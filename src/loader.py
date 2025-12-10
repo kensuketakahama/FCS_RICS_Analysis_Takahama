@@ -4,7 +4,6 @@ from scipy.fft import rfft, rfftfreq, irfft
 from scipy.signal import iirnotch, filtfilt
 
 def load_fcs_trace(filepath):
-    """(変更なし)"""
     try:
         data = tifffile.imread(filepath)
         trace = data.flatten().astype(np.float64)
@@ -57,7 +56,6 @@ def remove_periodic_noise(trace, sampling_interval, target_freq, Q=30.0):
     return filtered_trace
 
 def process_trace(trace, window_size_ratio=0.01):
-    """(以前の退色補正と同じ)"""
     from scipy.ndimage import uniform_filter1d
     n = len(trace)
     w_size = int(n * window_size_ratio)

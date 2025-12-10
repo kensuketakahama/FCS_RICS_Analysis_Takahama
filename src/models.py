@@ -2,7 +2,6 @@ import numpy as np
 from scipy.optimize import curve_fit
 
 def fcs_calibration_model(tau, N, D, w0, wz, T, tau_trip):
-    """(変更なし)"""
     term_xy = (1 + (4 * D * tau) / (w0**2))**(-1)
     term_z  = (1 + (4 * D * tau) / (wz**2))**(-0.5)
     term_trip = 1 + (T / (1 - T)) * np.exp(-tau / tau_trip)
@@ -10,9 +9,6 @@ def fcs_calibration_model(tau, N, D, w0, wz, T, tau_trip):
     return G
 
 def fit_calibration_data(lags, G_data, params, fix_flags, param_bounds):
-    """
-    【修正】param_bounds (最小値リスト, 最大値リスト) を受け取るように変更
-    """
     target_vars = ['N', 'D', 'w0', 'wz', 'T', 'tau_trip']
     p0 = []
     vary_keys = []
