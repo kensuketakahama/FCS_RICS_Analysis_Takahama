@@ -9,7 +9,7 @@ def load_tiff(filepath):
 def subtract_moving_average(image_stack, window_size):
     """
     移動平均減算処理 (不動成分の除去)
-    MIA (Moving Image Analysis) の基本処理に相当
+    MIAの基本処理に相当
     """
     # 時間軸方向(axis=0)に対して移動平均を計算
     # mode='nearest' は端の処理
