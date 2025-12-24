@@ -29,14 +29,6 @@ python3.8.2 以降で実行可能
 └── RWADME.md
 ```
 
-<pre>
-.
-├── FCS
-└── 
-├── xxx
-└── README.md
-</pre>
-
 # RICS
 
 RICS は現在 GUI でサポートしている。  
