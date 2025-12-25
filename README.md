@@ -1,13 +1,3 @@
-# FCS_RICS_Analysis_Takahama
-
-FCS・RICS 解析用スクリプト
-
-# Requirements
-
-mac での実行は確認しているが、windows で対応可能かは不明。  
-両方の OS で動作可能なようには実装している。  
-python3.8.2 以降で実行可能
-
 # Directory
 
 ```
