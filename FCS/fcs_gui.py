@@ -15,13 +15,14 @@ from src import model
 class FCSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("FCS Analysis App v6.0 (Detrend / Bleach Correction)")
+        self.root.title("FCS Analysis App v7.0 (All Points / No Binning)")
         self.root.geometry("1300x950")
 
         # Data
         self.raw_stack = None
-        self.trace_raw = None      # 補正前の生データ
-        self.trace_processed = None # Detrend後のデータ
+        self.trace_raw = None
+        self.trace_processed = None
+        self.time_axis = None
         
         # ACF Results
         self.acf_lags = None
@@ -29,12 +30,15 @@ class FCSApp:
         self.acf_sigma = None
         
         # --- Parameters ---
-        # Pixel Time (us)
         self.pixel_time_var = tk.DoubleVar(value=2.0)
         
-        # Detrend (New)
+        # Analysis Settings
         self.use_detrend_var = tk.BooleanVar(value=False)
-        self.detrend_cutoff_var = tk.DoubleVar(value=5.0) # ms
+        self.detrend_cutoff_var = tk.DoubleVar(value=5.0)
+        
+        # ★ New Options ★
+        self.use_log_bin_var = tk.BooleanVar(value=False) # デフォルトOFF (全点使用)
+        self.n_segments_var = tk.IntVar(value=1)          # デフォルト1 (全データ一括)
 
         # Beam Parameters
         self.w0_var = tk.DoubleVar(value=cfg.W0)
@@ -78,27 +82,34 @@ class FCSApp:
         
         ttk.Separator(panel, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 2. Config & Preprocessing
-        ttk.Label(panel, text="2. Config & Preprocessing", font=("bold")).pack(anchor="w", pady=5)
+        # 2. Config
+        ttk.Label(panel, text="2. Analysis Config", font=("bold")).pack(anchor="w", pady=5)
         
         f1 = ttk.Frame(panel); f1.pack(fill=tk.X, pady=2)
         ttk.Label(f1, text="Pixel Time (us):").pack(side=tk.LEFT)
         ttk.Entry(f1, textvariable=self.pixel_time_var, width=8).pack(side=tk.LEFT, padx=5)
 
-        # Detrend Section
-        d_frame = ttk.LabelFrame(panel, text="Bleach Correction")
+        # Detrend
+        d_frame = ttk.LabelFrame(panel, text="Preprocessing")
         d_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(d_frame, text="Bleach Correction (Detrend)", variable=self.use_detrend_var, 
+                        command=self.update_analysis).pack(anchor="w")
         
-        d_row1 = ttk.Frame(d_frame); d_row1.pack(fill=tk.X, pady=2)
-        ttk.Checkbutton(d_row1, text="Apply Detrend", variable=self.use_detrend_var, 
-                        command=self.update_analysis).pack(side=tk.LEFT)
+        # Binning & Segments
+        b_frame = ttk.LabelFrame(panel, text="ACF Calculation Mode")
+        b_frame.pack(fill=tk.X, pady=5)
         
-        d_row2 = ttk.Frame(d_frame); d_row2.pack(fill=tk.X, pady=2)
-        ttk.Label(d_row2, text="Cutoff (ms):").pack(side=tk.LEFT)
-        entry_cut = ttk.Entry(d_row2, textvariable=self.detrend_cutoff_var, width=6)
-        entry_cut.pack(side=tk.LEFT, padx=5)
-        entry_cut.bind("<Return>", lambda e: self.update_analysis())
-        ttk.Button(d_row2, text="Apply", command=self.update_analysis).pack(side=tk.LEFT)
+        # Segments
+        f_seg = ttk.Frame(b_frame); f_seg.pack(fill=tk.X, pady=2)
+        ttk.Label(f_seg, text="Segments (Avg):").pack(side=tk.LEFT)
+        ttk.Entry(f_seg, textvariable=self.n_segments_var, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Label(f_seg, text="(1 = Full Trace)").pack(side=tk.LEFT)
+        
+        # Log Binning
+        ttk.Checkbutton(b_frame, text="Use Log Binning (Reduce Pts)", variable=self.use_log_bin_var,
+                        command=self.update_analysis).pack(anchor="w")
+        
+        ttk.Button(b_frame, text="Update ACF", command=self.update_analysis).pack(fill=tk.X, pady=5)
 
         # Beam
         ttk.Label(panel, text="Beam Params:", font=("small")).pack(anchor="w", pady=(5,0))
@@ -129,7 +140,7 @@ class FCSApp:
         make_row("tau_T:", self.fit_trip_var, self.fix_trip_var)
         make_row("y0:", self.fit_y0_var, self.fix_y0_var)
 
-        ttk.Button(panel, text="Run Fitting", command=self.run_fitting).pack(fill=tk.X, pady=10)
+        ttk.Button(panel, text="Run Fitting (All Points)", command=self.run_fitting).pack(fill=tk.X, pady=10)
 
         # Results
         res_grp = ttk.LabelFrame(panel, text="Final Results")
@@ -176,32 +187,40 @@ class FCSApp:
         pt_sec = self.pixel_time_var.get() * 1e-6
         n = len(self.trace_raw)
         
-        # --- Detrend Logic ---
+        # Detrend
         if self.use_detrend_var.get():
             cutoff_ms = self.detrend_cutoff_var.get()
             cutoff_sec = cutoff_ms * 1e-3
-            # Preprocessingモジュールのdetrend関数を使用
             self.trace_processed = prep.detrend_1d_trace(self.trace_raw, pt_sec, cutoff_sec)
         else:
             self.trace_processed = self.trace_raw.copy()
 
         self.time_axis = np.arange(n) * pt_sec
         
-        # --- ACF Calculation (Using processed trace) ---
-        lags_raw, G_raw, sem_raw = calc.calculate_segmented_acf(self.trace_processed, n_segments=10)
+        # --- ACF Calculation ---
+        # User specified segments (Default 1 = Full Trace)
+        n_seg = max(1, self.n_segments_var.get())
+        
+        lags_raw, G_raw, sem_raw = calc.calculate_segmented_acf(self.trace_processed, n_segments=n_seg)
         time_lags = lags_raw * pt_sec
         
-        # --- Log Binning ---
-        self.acf_lags, self.acf_G, self.acf_sigma = calc.log_binning_weighted(time_lags, G_raw, sem_raw)
+        if self.use_log_bin_var.get():
+            # Binning Mode
+            self.acf_lags, self.acf_G, self.acf_sigma = calc.log_binning_weighted(time_lags, G_raw, sem_raw)
+        else:
+            # All Points Mode (No Binning)
+            # ラグ0はショットノイズなので除外するのが一般的だが、ここではすべて保持
+            self.acf_lags = time_lags
+            self.acf_G = G_raw
+            # 標準誤差 (n_seg=1 の場合はダミー1e-5が入っている)
+            self.acf_sigma = sem_raw
         
         self.plot_graphs()
 
     def plot_graphs(self, fit_curve_lags=None, fit_curve_G=None):
-        # Trace Plot
         self.ax_trace.clear()
         step = max(1, len(self.trace_processed) // 10000)
         
-        # 生データを薄く表示
         if self.use_detrend_var.get():
             self.ax_trace.plot(self.time_axis[::step], self.trace_raw[::step], 'k-', lw=0.5, alpha=0.3, label='Raw')
             self.ax_trace.plot(self.time_axis[::step], self.trace_processed[::step], 'g-', lw=0.5, label='Detrended')
@@ -213,17 +232,26 @@ class FCSApp:
         self.ax_trace.set_xlabel("Time (s)")
         self.ax_trace.grid(True)
 
-        # ACF Plot
         self.ax_acf.clear()
         if self.acf_lags is not None and len(self.acf_lags) > 0:
-            self.ax_acf.errorbar(self.acf_lags, self.acf_G, yerr=self.acf_sigma, 
-                                 fmt='bo', ms=3, capsize=2, alpha=0.5, label='Binned Data')
+            # データ点数が多すぎる場合、描画時は間引く (Fittingは全点使う)
+            plot_step = 1
+            if not self.use_log_bin_var.get() and len(self.acf_lags) > 5000:
+                plot_step = len(self.acf_lags) // 2000 # 最大2000点くらいに抑える
+            
+            # 誤差バーは重くなるので、Binning OFF時は点で表示
+            if self.use_log_bin_var.get():
+                self.ax_acf.errorbar(self.acf_lags, self.acf_G, yerr=self.acf_sigma, 
+                                     fmt='bo', ms=3, capsize=2, alpha=0.5, label='Data')
+            else:
+                self.ax_acf.plot(self.acf_lags[::plot_step], self.acf_G[::plot_step], 
+                                 'b.', ms=2, alpha=0.3, label='Data (All Points)')
+                
             self.ax_acf.set_xscale('log')
 
         if fit_curve_lags is not None:
             self.ax_acf.plot(fit_curve_lags, fit_curve_G, 'r-', lw=2, label='Fit')
 
-        # Range Lines
         t_min = self.range_min_var.get()
         t_max = self.range_max_var.get()
         self.drag_lines['min'] = self.ax_acf.axvline(t_min, color='orange', ls='--', picker=5, label='Range')
@@ -248,9 +276,16 @@ class FCSApp:
         y_fit = self.acf_G[mask]
         sigma_fit = self.acf_sigma[mask]
         
-        if len(sigma_fit) > 0:
-            mean_sigma = np.mean(sigma_fit[sigma_fit > 0]) if np.any(sigma_fit > 0) else 1.0
-            sigma_fit[sigma_fit == 0] = mean_sigma
+        # Sigma処理
+        # Seg=1 (全点) の場合、sigmaはダミーなので重みなし(=1.0)にする
+        if self.n_segments_var.get() == 1 and not self.use_log_bin_var.get():
+            sigma_fit = None # 重みなし最小二乗法
+            absolute_sigma = False
+        else:
+            if len(sigma_fit) > 0:
+                mean_sigma = np.mean(sigma_fit[sigma_fit > 0]) if np.any(sigma_fit > 0) else 1.0
+                sigma_fit[sigma_fit == 0] = mean_sigma
+            absolute_sigma = True
         
         if len(y_fit) < 5:
             messagebox.showerror("Error", "Not enough points in range")
@@ -284,13 +319,17 @@ class FCSApp:
         def wrapper(t, *args):
             current = vals.copy()
             for i, k in enumerate(free_keys): current[k] = args[i]
-            return model.fcs_standard_model(t, current['N'], current['D'], current['w0'], current['wz'],
-                                            current['T'], current['tau_trip'], current['y0'])
+            return model.fcs_standard_model(
+                t, current['N'], current['D'], current['w0'], current['wz'],
+                current['T'], current['tau_trip'], current['y0']
+            )
 
         try:
             if len(free_keys) > 0:
+                # フィッティング実行
+                # sigma_fit=None なら重みなし
                 popt, _ = curve_fit(wrapper, x_fit, y_fit, p0=p0, sigma=sigma_fit, 
-                                    absolute_sigma=True, bounds=(b_min, b_max), maxfev=3000)
+                                    absolute_sigma=absolute_sigma, bounds=(b_min, b_max), maxfev=3000)
                 for i, k in enumerate(free_keys):
                     vals[k] = popt[i]
                     if k=='N': self.fit_N_var.set(round(vals[k], 4))
@@ -310,11 +349,12 @@ class FCSApp:
                 f"N = {vals['N']:.3f}\n"
                 f"T = {vals['T']*100:.1f} %\n"
                 f"tau_T = {vals['tau_trip']*1e6:.1f} us\n"
+                f"y0 = {vals['y0']:.2e}\n"
                 f"G(0) = {g0_theo:.4f}"
             )
             self.res_txt.set(res_str)
             
-            smooth_lags = np.logspace(np.log10(min(self.acf_lags)), np.log10(max(self.acf_lags)), 200)
+            smooth_lags = np.logspace(np.log10(min(self.acf_lags[self.acf_lags>0])), np.log10(max(self.acf_lags)), 200)
             smooth_G = model.fcs_standard_model(
                 smooth_lags, vals['N'], vals['D'], vals['w0'], vals['wz'],
                 vals['T'], vals['tau_trip'], vals['y0']
