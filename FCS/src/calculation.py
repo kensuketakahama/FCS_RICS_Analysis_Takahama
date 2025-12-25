@@ -1,27 +1,6 @@
 import numpy as np
 from scipy.fft import fft2, ifft2, fftshift
 
-# --- RICS用 (変更なし) ---
-def calculate_2d_acf(roi_stack):
-    T, H, W = roi_stack.shape
-    G_sum = np.zeros((H, W), dtype=np.float64)
-    valid_frames = 0
-    for t in range(T):
-        img = roi_stack[t, :, :]
-        mean_I = np.mean(img)
-        if mean_I == 0: continue
-        F = fft2(img)
-        P = F * np.conj(F)
-        acf = np.real(ifft2(P))
-        acf = fftshift(acf)
-        norm_acf = acf / (mean_I**2 * H * W) - 1
-        G_sum += norm_acf
-        valid_frames += 1
-    if valid_frames == 0: return np.zeros((H, W))
-    return G_sum / valid_frames
-
-# --- FCS用 (Main.pyのロジック移植) ---
-
 def _correlate_1d(a, b):
     """高速相関計算 (FFT使用)"""
     n = len(a)

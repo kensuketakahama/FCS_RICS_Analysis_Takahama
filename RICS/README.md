@@ -18,17 +18,6 @@ Pythonによる Raster Image Correlation Spectroscopy (RICS) 解析用GUIアプ�
     * 別ウィンドウでの結果確認。
 * **画像保存:** 解析結果グラフやヒートマップのJPEG/PNG保存。
 
-## 環境構築 (Installation)
-
-本アプリケーションは GUIライブラリとして **Tkinter** を使用しています。
-特に macOS では、システム標準の Python (`/usr/bin/python3`) を使用すると、Tcl/Tkライブラリのバージョン不整合により**画面が真っ白になる問題**が発生します。
-
-そのため、必ず以下の手順に従って **Homebrew版 Python** と **仮想環境 (venv)** を使用してください。
-
-### 前提条件
-* Python 3.10 以上
-* Homebrew (macOSの場合)
-
 ### macOS でのセットアップ手順
 
 1.  **Homebrew で Python と Tkinter をインストール**
