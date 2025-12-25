@@ -15,7 +15,7 @@ Pythonによる蛍光相関分光法 (Fluorescence Correlation Spectroscopy, FCS
     * **All Points Mode:** ビニングなしの全データ点を用いた解析も可能。
 * **フィッティング (Fitting):**
     * **Standard Model:** 1成分3次元拡散 + トリプレット + オフセット項を用いた非線形最小二乗法。
-    * **Fix/Free制御:** 各パラメータ（$D, N, w_0, \tau_{trip}$ 等）の固定/変動を個別に設定可能。
+    * **Fix/Free制御:** 各パラメータ（$`D, N, w_0, \tau_{trip}`$ 等）の固定/変動を個別に設定可能。
 
 ## 環境構築 (Requirements)
 
@@ -41,7 +41,7 @@ Pythonによる蛍光相関分光法 (Fluorescence Correlation Spectroscopy, FCS
     * **ACF Calculation Mode:** 通常は "Use Log Binning" をONにすることを推奨します。全データを見たい場合はOFFにします。
 4.  **ビームパラメータ設定:**
     * **w0 (Lateral):** 焦点半径。キャリブレーション等で得られた値を入力し、基本的には "Fix" します。
-    * **wz (Axial):** 軸方向半径。$S = w_z/w_0$ (構造因子) の決定に使われます。
+    * **wz (Axial):** 軸方向半径。$`S = w_z/w_0`$ (構造因子) の決定に使われます。
 5.  **フィッティング (Fitting):**
     * 初期値 (Initial Guess) を入力し、固定したいパラメータの "Fix" にチェックを入れます。
     * "Run Fitting" で解析を実行します。
@@ -60,18 +60,22 @@ $$
 各項の詳細は以下の通りです。
 
 1.  **拡散項 (Diffusion Term):** 3次元ガウス型焦点領域における自由拡散
-    $$
-    G_{diff}(\tau) = \left( 1 + \frac{\tau}{\tau_D} \right)^{-1} \left( 1 + \frac{\tau}{S^2 \tau_D} \right)^{-0.5}
-    $$
-    * ここで、拡散時間 $\tau_D$ と構造因子 $S$ は以下の関係にあります。
-        $$
-        \tau_D = \frac{w_0^2}{4D}, \quad S = \frac{w_z}{w_0}
-        $$
+
+$$
+G_{diff}(\tau) = \left( 1 + \frac{\tau}{\tau_D} \right)^{-1} \left( 1 + \frac{\tau}{S^2 \tau_D} \right)^{-0.5}
+$$
+
+ここで、拡散時間 $`\tau_D`$ と構造因子 $`S`$ は以下の関係にあります。
+    
+$$
+\tau_D = \frac{w_0^2}{4D}, \quad S = \frac{w_z}{w_0}
+$$
 
 2.  **トリプレット項 (Triplet Term):** 暗状態への遷移による明滅成分
-    $$
-    G_{trip}(\tau) = 1 + \frac{T}{1-T} \exp\left( -\frac{\tau}{\tau_{trip}} \right)
-    $$
+
+$$
+G_{trip}(\tau) = 1 + \frac{T}{1-T} \exp\left( -\frac{\tau}{\tau_{trip}} \right)
+$$
 
 ### パラメータの意味
 | パラメータ | 記号 | 説明 | 単位 |
