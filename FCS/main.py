@@ -4,7 +4,7 @@ import numpy as np
 # 必要なモジュールをインポート
 from src.loader import load_fcs_trace, analyze_noise_spectrum, remove_periodic_noise, process_trace_detrend
 from src.correlation import calculate_segmented_acf, log_binning_weighted
-from src.models import fit_standard_data, fcs_standard_model
+from src.model_old import fit_standard_data, fcs_standard_model
 
 def main():
     FILE_PATH = 'Data/FCS1_TAMRA1000nM.tif' 
