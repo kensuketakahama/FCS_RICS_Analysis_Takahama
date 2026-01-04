@@ -20,7 +20,7 @@ from src import model
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v10.0 (Separate Heatmap Window)")
+        self.root.title("RICS Analysis App v12.0 (Percentile Scaling)")
         self.root.geometry("1400x1000")
 
         # データ保持用
@@ -31,7 +31,7 @@ class RICSApp:
         
         # ヒートマップ結果保持用
         self.heatmap_d_map = None
-        self.hm_window = None # 別ウィンドウ保持用
+        self.hm_window = None 
         
         # スレッド制御用
         self.heatmap_thread = None
@@ -56,9 +56,11 @@ class RICSApp:
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
         
-        # Heatmap Threshold (New)
-        self.hm_use_threshold_var = tk.BooleanVar(value=False)
-        self.hm_threshold_val_var = tk.DoubleVar(value=50.0)
+        # Visualization Config
+        self.hm_autoscale_var = tk.BooleanVar(value=True) # Percentile Mode Check
+        self.hm_percentile_var = tk.DoubleVar(value=95.0) # Percentile Value (New)
+        self.hm_max_val_var = tk.DoubleVar(value=100.0)   # Manual Max
+        self.hm_interp_var = tk.StringVar(value="nearest")
 
         self.n_var = tk.StringVar(value="---")
         self.result_text = tk.StringVar(value="Ready...")
@@ -203,26 +205,39 @@ class RICSApp:
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
         # 6. Heatmap Analysis
-        ttk.Label(parent, text="6. Heatmap Analysis (ROI Only)", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        ttk.Label(parent, text="6. Heatmap Analysis", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
+        # Conf
         hm_conf = ttk.Frame(parent)
         hm_conf.pack(fill=tk.X, pady=2)
         ttk.Label(hm_conf, text="Win Size:").pack(side=tk.LEFT)
         ttk.Entry(hm_conf, textvariable=self.hm_window_var, width=5).pack(side=tk.LEFT, padx=5)
-        ttk.Label(hm_conf, text="Step:").pack(side=tk.LEFT)
+        ttk.Label(hm_conf, text="Step (px):").pack(side=tk.LEFT)
         ttk.Entry(hm_conf, textvariable=self.hm_step_var, width=5).pack(side=tk.LEFT, padx=5)
         
-        # --- Threshold Config ---
-        hm_thresh_f = ttk.Frame(parent)
-        hm_thresh_f.pack(fill=tk.X, pady=2)
-        ttk.Checkbutton(hm_thresh_f, text="Clamp High D (Use Threshold)", variable=self.hm_use_threshold_var).pack(side=tk.LEFT)
+        # --- Visualization Config ---
+        vis_grp = ttk.LabelFrame(parent, text="Display Settings")
+        vis_grp.pack(fill=tk.X, pady=5)
         
-        hm_thresh_v = ttk.Frame(parent)
-        hm_thresh_v.pack(fill=tk.X, pady=2)
-        ttk.Label(hm_thresh_v, text="Threshold:").pack(side=tk.LEFT, padx=5)
-        ttk.Entry(hm_thresh_v, textvariable=self.hm_threshold_val_var, width=8).pack(side=tk.LEFT)
-        ttk.Button(hm_thresh_v, text="Re-draw Map Only", command=self.plot_heatmap_result).pack(side=tk.LEFT, padx=10)
+        # Auto Scale (Percentile)
+        v_row1 = ttk.Frame(vis_grp); v_row1.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(v_row1, text="Scale by Percentile", variable=self.hm_autoscale_var).pack(side=tk.LEFT)
+        ttk.Entry(v_row1, textvariable=self.hm_percentile_var, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Label(v_row1, text="%").pack(side=tk.LEFT)
+        
+        # Manual Max
+        v_row2 = ttk.Frame(vis_grp); v_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(v_row2, text="or Manual Max D (um^2/s):").pack(side=tk.LEFT)
+        ttk.Entry(v_row2, textvariable=self.hm_max_val_var, width=6).pack(side=tk.LEFT, padx=5)
+        
+        # Interpolation
+        v_row3 = ttk.Frame(vis_grp); v_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(v_row3, text="Interpolation:").pack(side=tk.LEFT)
+        ttk.Combobox(v_row3, textvariable=self.hm_interp_var, values=["nearest", "bicubic", "bilinear"], width=10, state="readonly").pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(vis_grp, text="Re-draw Map Only", command=self.plot_heatmap_result).pack(fill=tk.X, pady=2)
 
+        # Progress
         self.progress_bar = ttk.Progressbar(parent, variable=self.progress_val, maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.heatmap_status, font=("Arial", 9)).pack(anchor="w")
@@ -363,15 +378,19 @@ class RICSApp:
         fit_params = {k: v.get() for k, v in self.entries.items()}
         fixed_params = {k: v.get() for k, v in self.checkvars.items()}
         
+        omit_r = self.omit_radius_var.get()
+        range_x = self.fit_range_x_var.get()
+        range_y = self.fit_range_y_var.get()
+        
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
-            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params)
+            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y)
         )
         self.heatmap_thread.daemon = True
         self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params):
+    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y):
         T, H, W = data.shape
         half_w = win_size // 2
         
@@ -383,10 +402,6 @@ class RICSApp:
         
         frees = [k for k, v in fixed_params.items() if not v]
         p0 = [fit_params[k] for k in frees]
-        
-        omit_r = self.omit_radius_var.get()
-        range_x = self.fit_range_x_var.get()
-        range_y = self.fit_range_y_var.get()
         
         for y in range(start_y, end_y, step):
             if self.stop_event.is_set(): break
@@ -463,68 +478,114 @@ class RICSApp:
         self.stop_event.set()
 
     def plot_heatmap_result(self):
-        """別ウィンドウにヒートマップを表示 (閾値処理あり)"""
+        """別ウィンドウにヒートマップを表示 (Fix: Robust redraw & NaN handling)"""
         if self.heatmap_d_map is None: return
 
-        # 別ウィンドウ作成 または 既存ウィンドウの取得
+        # ウィンドウの作成・取得
         if self.hm_window is None or not tk.Toplevel.winfo_exists(self.hm_window):
             self.hm_window = tk.Toplevel(self.root)
             self.hm_window.title("Heatmap Result")
             self.hm_window.geometry("800x600")
             
-            # Matplotlib Figure
             self.hm_fig = plt.Figure(figsize=(8, 6), dpi=100)
-            self.hm_ax = self.hm_fig.add_subplot(111)
+            # ここでは subplot を追加せず、描画時に毎回 fig.clf() する
             
-            # Canvas & Toolbar
             self.hm_canvas = FigureCanvasTkAgg(self.hm_fig, master=self.hm_window)
             self.hm_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             toolbar = NavigationToolbar2Tk(self.hm_canvas, self.hm_window)
             toolbar.update()
             self.hm_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         else:
-            # 既存ウィンドウがあれば前面に持ってくる
             self.hm_window.lift()
-            self.hm_ax.clear()
 
-        # === 閾値処理 ===
+        # ★修正1: 安全なリセット (ax.clear() + cbar.remove() の代わりに Figure全体をクリア)
+        self.hm_fig.clf()
+        self.hm_ax = self.hm_fig.add_subplot(111)
+
+        # === Data Visualization Logic ===
         display_map = self.heatmap_d_map.copy()
         
-        if self.hm_use_threshold_var.get():
-            thresh = self.hm_threshold_val_var.get()
-            # 計算された値全体の平均 (NaN除く)
-            avg_d = np.nanmean(self.heatmap_d_map)
-            
-            # 閾値を超える場所を平均値で置換
-            # (NaNと比較するとRuntimeWarningが出るので whereを使う)
-            mask_high = np.where(display_map > thresh, True, False)
-            display_map[mask_high] = avg_d
+        # ★修正2: データがすべてNaNの場合のガード処理
+        valid_mask = ~np.isnan(display_map)
+        if not np.any(valid_mask):
+            self.hm_ax.text(0.5, 0.5, "No valid fitting results.\nCheck ROI, Window size, or Threshold.", 
+                            ha='center', va='center', transform=self.hm_ax.transAxes)
+            self.hm_ax.set_title("Result Empty")
+            self.hm_canvas.draw()
+            return
 
-        im = self.hm_ax.imshow(display_map, cmap='jet', interpolation='nearest')
-        self.hm_ax.set_title("Diffusion Map (ROI)")
-        self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
+        # Color Scale Range
+        vmin, vmax = None, None
+        
+        if self.hm_autoscale_var.get():
+            valid_data = display_map[valid_mask]
+            if len(valid_data) > 0:
+                vmin = np.nanmin(valid_data)
+                # Percentile Value from Entry
+                try:
+                    perc_val = self.hm_percentile_var.get()
+                    if perc_val < 0: perc_val = 0
+                    if perc_val > 100: perc_val = 100
+                except:
+                    perc_val = 95.0
+                
+                vmax = np.nanpercentile(valid_data, perc_val)
+        else:
+            # Manual Max
+            valid_data = display_map[valid_mask]
+            if len(valid_data) > 0:
+                vmin = np.nanmin(valid_data)
+                vmax = self.hm_max_val_var.get()
+        
+        # ★修正3: vmin/vmax の整合性チェック (ValueError回避)
+        if vmin is not None and vmax is not None:
+            if vmin > vmax: 
+                # ユーザー入力等で逆転した場合の補正
+                vmin, vmax = vmax, vmin
+            if vmin == vmax:
+                # 幅がない場合、少し広げる
+                vmax = vmin + 1e-9
+
+        interp = self.hm_interp_var.get()
+
+        im = self.hm_ax.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
+        self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
+        
+        # カラーバーの追加 (fig.clf() しているので安全)
+        self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
         
         self.hm_canvas.draw()
 
 
     def save_heatmap_image(self):
-        # 閾値処理後の画像を保存したい場合は、現在のウィンドウから保存するか、
-        # plot_heatmap_result と同じロジックを通す必要がある。
         if self.heatmap_d_map is None: return
         filepath = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png"), ("All", "*.*")])
         if filepath:
             try:
-                # 一時的なFigureで作る (閾値処理も反映)
                 fig_temp = plt.figure(figsize=(6, 5))
                 ax_temp = fig_temp.add_subplot(111)
                 
                 display_map = self.heatmap_d_map.copy()
-                if self.hm_use_threshold_var.get():
-                    thresh = self.hm_threshold_val_var.get()
-                    avg_d = np.nanmean(self.heatmap_d_map)
-                    display_map[np.where(display_map > thresh, True, False)] = avg_d
+                
+                vmin, vmax = None, None
+                if self.hm_autoscale_var.get():
+                    valid = display_map[~np.isnan(display_map)]
+                    if len(valid) > 0:
+                        vmin = np.nanmin(valid)
+                        try:
+                            perc_val = self.hm_percentile_var.get()
+                            if perc_val < 0: perc_val = 0
+                            if perc_val > 100: perc_val = 100
+                        except: perc_val = 95.0
+                        vmax = np.nanpercentile(valid, perc_val)
+                else:
+                    valid = display_map[~np.isnan(display_map)]
+                    if len(valid) > 0:
+                        vmin = np.nanmin(valid)
+                        vmax = self.hm_max_val_var.get()
 
-                im = ax_temp.imshow(display_map, cmap='jet')
+                interp = self.hm_interp_var.get()
+                im = ax_temp.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
                 ax_temp.set_title("Diffusion Map")
                 fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
                 fig_temp.savefig(filepath, dpi=300)
