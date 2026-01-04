@@ -20,7 +20,7 @@ from src import model
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v12.0 (Percentile Scaling)")
+        self.root.title("RICS Analysis App v13.0 (Auto-Detect Range)")
         self.root.geometry("1400x1000")
 
         # データ保持用
@@ -51,15 +51,18 @@ class RICSApp:
         self.omit_radius_var = tk.DoubleVar(value=0.0)
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
+        
+        # ★ New: Auto Range Detect Checkbox
+        self.auto_range_var = tk.BooleanVar(value=False)
 
         # Heatmap設定
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
         
         # Visualization Config
-        self.hm_autoscale_var = tk.BooleanVar(value=True) # Percentile Mode Check
-        self.hm_percentile_var = tk.DoubleVar(value=95.0) # Percentile Value (New)
-        self.hm_max_val_var = tk.DoubleVar(value=100.0)   # Manual Max
+        self.hm_autoscale_var = tk.BooleanVar(value=True)
+        self.hm_percentile_var = tk.DoubleVar(value=95.0)
+        self.hm_max_val_var = tk.DoubleVar(value=100.0)
         self.hm_interp_var = tk.StringVar(value="nearest")
 
         self.n_var = tk.StringVar(value="---")
@@ -125,7 +128,7 @@ class RICSApp:
         ttk.Label(bg_frame, text="Mov.Avg:").pack(side=tk.LEFT)
         ttk.Entry(bg_frame, textvariable=self.ma_window_var, width=5).pack(side=tk.LEFT, padx=5)
 
-        roi_grp = ttk.LabelFrame(parent, text="ROI Config (Draw/Click on Image)")
+        roi_grp = ttk.LabelFrame(parent, text="ROI Config")
         roi_grp.pack(fill=tk.X, pady=5)
         
         f_sz = ttk.Frame(roi_grp); f_sz.pack(fill=tk.X, pady=2)
@@ -140,7 +143,7 @@ class RICSApp:
         ttk.Label(f_pos, text=" Y:").pack(side=tk.LEFT)
         ttk.Entry(f_pos, textvariable=self.roi_cy_var, width=5).pack(side=tk.LEFT)
 
-        ttk.Button(parent, text="Update Image & ACF (Manual)", command=self.update_processing_and_acf).pack(fill=tk.X, pady=5)
+        ttk.Button(parent, text="Update Image & ACF", command=self.update_processing_and_acf).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
@@ -152,18 +155,24 @@ class RICSApp:
         ttk.Entry(omit_frame, textvariable=self.omit_radius_var, width=5).pack(side=tk.LEFT, padx=5)
         ttk.Label(omit_frame, text="px").pack(side=tk.LEFT)
 
-        range_frame = ttk.LabelFrame(parent, text="Fitting Range (+/- px)")
+        # Range Frame
+        range_frame = ttk.LabelFrame(parent, text="Fitting Range")
         range_frame.pack(fill=tk.X, pady=5)
+        
+        # Auto Range Checkbox
+        ttk.Checkbutton(range_frame, text="Auto-Detect Fit Range (Monotonic)", variable=self.auto_range_var).pack(anchor="w", padx=5, pady=2)
+        
         fr_x = ttk.Frame(range_frame); fr_x.pack(fill=tk.X)
-        ttk.Label(fr_x, text="X Range:").pack(side=tk.LEFT)
+        ttk.Label(fr_x, text="Manual X (+/-):").pack(side=tk.LEFT)
         self.fit_range_x_var.trace_add("write", lambda *args: self.update_lines_from_entry())
         ttk.Entry(fr_x, textvariable=self.fit_range_x_var, width=5).pack(side=tk.LEFT, padx=5)
+        
         fr_y = ttk.Frame(range_frame); fr_y.pack(fill=tk.X)
-        ttk.Label(fr_y, text="Y Range:").pack(side=tk.LEFT)
+        ttk.Label(fr_y, text="Manual Y (+/-):").pack(side=tk.LEFT)
         self.fit_range_y_var.trace_add("write", lambda *args: self.update_lines_from_entry())
         ttk.Entry(fr_y, textvariable=self.fit_range_y_var, width=5).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(parent, text="Refresh Plots (Apply Scale)", command=lambda: self.plot_results(None)).pack(fill=tk.X, pady=2)
+        ttk.Button(parent, text="Refresh Plots", command=lambda: self.plot_results(None)).pack(fill=tk.X, pady=2)
 
         # Parameters
         self.params = {
@@ -204,10 +213,9 @@ class RICSApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 6. Heatmap Analysis
+        # 6. Heatmap
         ttk.Label(parent, text="6. Heatmap Analysis", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
-        # Conf
         hm_conf = ttk.Frame(parent)
         hm_conf.pack(fill=tk.X, pady=2)
         ttk.Label(hm_conf, text="Win Size:").pack(side=tk.LEFT)
@@ -215,29 +223,24 @@ class RICSApp:
         ttk.Label(hm_conf, text="Step (px):").pack(side=tk.LEFT)
         ttk.Entry(hm_conf, textvariable=self.hm_step_var, width=5).pack(side=tk.LEFT, padx=5)
         
-        # --- Visualization Config ---
         vis_grp = ttk.LabelFrame(parent, text="Display Settings")
         vis_grp.pack(fill=tk.X, pady=5)
         
-        # Auto Scale (Percentile)
         v_row1 = ttk.Frame(vis_grp); v_row1.pack(fill=tk.X, pady=2)
         ttk.Checkbutton(v_row1, text="Scale by Percentile", variable=self.hm_autoscale_var).pack(side=tk.LEFT)
         ttk.Entry(v_row1, textvariable=self.hm_percentile_var, width=5).pack(side=tk.LEFT, padx=5)
         ttk.Label(v_row1, text="%").pack(side=tk.LEFT)
         
-        # Manual Max
         v_row2 = ttk.Frame(vis_grp); v_row2.pack(fill=tk.X, pady=2)
         ttk.Label(v_row2, text="or Manual Max D (um^2/s):").pack(side=tk.LEFT)
         ttk.Entry(v_row2, textvariable=self.hm_max_val_var, width=6).pack(side=tk.LEFT, padx=5)
         
-        # Interpolation
         v_row3 = ttk.Frame(vis_grp); v_row3.pack(fill=tk.X, pady=2)
         ttk.Label(v_row3, text="Interpolation:").pack(side=tk.LEFT)
         ttk.Combobox(v_row3, textvariable=self.hm_interp_var, values=["nearest", "bicubic", "bilinear"], width=10, state="readonly").pack(side=tk.LEFT, padx=5)
         
         ttk.Button(vis_grp, text="Re-draw Map Only", command=self.plot_heatmap_result).pack(fill=tk.X, pady=2)
 
-        # Progress
         self.progress_bar = ttk.Progressbar(parent, variable=self.progress_val, maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.heatmap_status, font=("Arial", 9)).pack(anchor="w")
@@ -246,14 +249,12 @@ class RICSApp:
         hm_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hm_btns, text="Generate Heatmap", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Button(hm_btns, text="Stop", command=self.stop_heatmap).pack(side=tk.LEFT, padx=2)
-        
         ttk.Button(parent, text="Save Heatmap Image", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
 
 
     def setup_plots(self):
         self.fig = plt.Figure(figsize=(10, 8), dpi=100)
         gs = self.fig.add_gridspec(2, 2)
-        
         self.ax_img = self.fig.add_subplot(gs[0, 0]) 
         self.ax_3d  = self.fig.add_subplot(gs[0, 1], projection='3d')
         self.ax_x   = self.fig.add_subplot(gs[1, 0])
@@ -274,7 +275,7 @@ class RICSApp:
         )
         self.selector.set_active(False)
 
-    # --- Mouse Events ---
+    # --- Mouse Events (省略なし) ---
     def on_click(self, event):
         if event.inaxes in [self.ax_x, self.ax_y]:
             if self.drag_lines:
@@ -287,7 +288,6 @@ class RICSApp:
                         active_lines = [('x_min', self.drag_lines.get('x_min')), ('x_max', self.drag_lines.get('x_max'))]
                     elif event.inaxes == self.ax_y:
                         active_lines = [('y_min', self.drag_lines.get('y_min')), ('y_max', self.drag_lines.get('y_max'))]
-
                     for name, line in active_lines:
                         if line is None: continue
                         line_x = line.get_xdata()[0]
@@ -295,11 +295,9 @@ class RICSApp:
                         if dist < min_dist:
                             min_dist = dist
                             target = name
-                    
                     if min_dist < (self.fit_range_x_var.get() * 0.2 + 1.0):
                         self.dragging_item = target
             return
-
         if event.inaxes == self.ax_img and event.xdata is not None:
             self.press_xy = (event.xdata, event.ydata)
 
@@ -314,7 +312,6 @@ class RICSApp:
         if self.dragging_item:
             self.dragging_item = None
             return
-
         if event.inaxes == self.ax_img and self.press_xy:
             release_xy = (event.xdata, event.ydata)
             if release_xy[0] is None: return
@@ -356,6 +353,31 @@ class RICSApp:
         except: pass
 
     # =======================================================
+    # Helper: Auto Range Detection
+    # =======================================================
+    def detect_monotonic_decay_range(self, data_1d, min_len=3):
+        """
+        1次元配列(ピークから外側へ)において、単調減少が崩れる(増加に転じる)最初の位置を返す。
+        ノイズ対策として3点移動平均を使用。
+        """
+        n = len(data_1d)
+        if n < min_len + 2: return n
+        
+        # 3-point Moving Average
+        smooth = np.convolve(data_1d, np.ones(3)/3, mode='valid')
+        # Difference
+        diff = np.diff(smooth)
+        
+        # Find index where diff > 0 (Increasing)
+        # smooth[i] corresponds to roughly data[i+1]
+        idx = np.where(diff > 0)[0]
+        if len(idx) > 0:
+            # First increasing point found
+            return idx[0] + 1
+            
+        return n
+
+    # =======================================================
     # Heatmap Logic
     # =======================================================
     def start_heatmap_thread(self):
@@ -381,16 +403,17 @@ class RICSApp:
         omit_r = self.omit_radius_var.get()
         range_x = self.fit_range_x_var.get()
         range_y = self.fit_range_y_var.get()
+        auto_range = self.auto_range_var.get() # ★ Checkbox State
         
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
-            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y)
+            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range)
         )
         self.heatmap_thread.daemon = True
         self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y):
+    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range):
         T, H, W = data.shape
         half_w = win_size // 2
         
@@ -433,7 +456,27 @@ class RICSApp:
 
                 dist_sq = SX.ravel()**2 + SY.ravel()**2
                 mask_omit = dist_sq <= (omit_r**2) if omit_r > 0 else np.zeros_like(dist_sq, dtype=bool)
-                mask_range = (np.abs(SX.ravel()) > range_x) | (np.abs(SY.ravel()) > range_y)
+                
+                # ★ Auto Range Detection Logic ★
+                curr_range_x = range_x
+                curr_range_y = range_y
+                
+                if auto_range:
+                    # Detect valid range from ACF center
+                    # X profile (Right side)
+                    x_profile = acf[sub_cy, sub_cx:]
+                    rx_detected = self.detect_monotonic_decay_range(x_profile)
+                    
+                    # Y profile (Bottom side)
+                    y_profile = acf[sub_cy:, sub_cx]
+                    ry_detected = self.detect_monotonic_decay_range(y_profile)
+                    
+                    # Use detected range (limit by manual range is optional, here we overwrite)
+                    curr_range_x = rx_detected
+                    curr_range_y = ry_detected
+
+                mask_range = (np.abs(SX.ravel()) > curr_range_x) | (np.abs(SY.ravel()) > curr_range_y)
+                
                 mask_valid = ~(mask_omit | mask_range)
                 
                 x_fit = xdata[:, mask_valid]
@@ -478,18 +521,15 @@ class RICSApp:
         self.stop_event.set()
 
     def plot_heatmap_result(self):
-        """別ウィンドウにヒートマップを表示 (Fix: Robust redraw & NaN handling)"""
+        """別ウィンドウにヒートマップを表示 (Robust)"""
         if self.heatmap_d_map is None: return
 
-        # ウィンドウの作成・取得
         if self.hm_window is None or not tk.Toplevel.winfo_exists(self.hm_window):
             self.hm_window = tk.Toplevel(self.root)
             self.hm_window.title("Heatmap Result")
             self.hm_window.geometry("800x600")
             
             self.hm_fig = plt.Figure(figsize=(8, 6), dpi=100)
-            # ここでは subplot を追加せず、描画時に毎回 fig.clf() する
-            
             self.hm_canvas = FigureCanvasTkAgg(self.hm_fig, master=self.hm_window)
             self.hm_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             toolbar = NavigationToolbar2Tk(self.hm_canvas, self.hm_window)
@@ -498,60 +538,44 @@ class RICSApp:
         else:
             self.hm_window.lift()
 
-        # ★修正1: 安全なリセット (ax.clear() + cbar.remove() の代わりに Figure全体をクリア)
+        # Safe redraw
         self.hm_fig.clf()
         self.hm_ax = self.hm_fig.add_subplot(111)
 
-        # === Data Visualization Logic ===
         display_map = self.heatmap_d_map.copy()
         
-        # ★修正2: データがすべてNaNの場合のガード処理
         valid_mask = ~np.isnan(display_map)
         if not np.any(valid_mask):
-            self.hm_ax.text(0.5, 0.5, "No valid fitting results.\nCheck ROI, Window size, or Threshold.", 
-                            ha='center', va='center', transform=self.hm_ax.transAxes)
-            self.hm_ax.set_title("Result Empty")
+            self.hm_ax.text(0.5, 0.5, "No valid fitting results.", ha='center', va='center')
             self.hm_canvas.draw()
             return
 
-        # Color Scale Range
         vmin, vmax = None, None
         
         if self.hm_autoscale_var.get():
             valid_data = display_map[valid_mask]
             if len(valid_data) > 0:
                 vmin = np.nanmin(valid_data)
-                # Percentile Value from Entry
                 try:
                     perc_val = self.hm_percentile_var.get()
                     if perc_val < 0: perc_val = 0
                     if perc_val > 100: perc_val = 100
-                except:
-                    perc_val = 95.0
-                
+                except: perc_val = 95.0
                 vmax = np.nanpercentile(valid_data, perc_val)
         else:
-            # Manual Max
             valid_data = display_map[valid_mask]
             if len(valid_data) > 0:
                 vmin = np.nanmin(valid_data)
                 vmax = self.hm_max_val_var.get()
         
-        # ★修正3: vmin/vmax の整合性チェック (ValueError回避)
         if vmin is not None and vmax is not None:
-            if vmin > vmax: 
-                # ユーザー入力等で逆転した場合の補正
-                vmin, vmax = vmax, vmin
-            if vmin == vmax:
-                # 幅がない場合、少し広げる
-                vmax = vmin + 1e-9
+            if vmin > vmax: vmin, vmax = vmax, vmin
+            if vmin == vmax: vmax = vmin + 1e-9
 
         interp = self.hm_interp_var.get()
 
         im = self.hm_ax.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
         self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
-        
-        # カラーバーの追加 (fig.clf() しているので安全)
         self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
         
         self.hm_canvas.draw()
@@ -574,8 +598,6 @@ class RICSApp:
                         vmin = np.nanmin(valid)
                         try:
                             perc_val = self.hm_percentile_var.get()
-                            if perc_val < 0: perc_val = 0
-                            if perc_val > 100: perc_val = 100
                         except: perc_val = 95.0
                         vmax = np.nanpercentile(valid, perc_val)
                 else:
