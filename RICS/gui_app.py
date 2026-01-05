@@ -20,7 +20,7 @@ from src import model
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v13.0 (Auto-Detect Range)")
+        self.root.title("RICS Analysis App v15.0 (Fixed Scale Live Plot)")
         self.root.geometry("1400x1000")
 
         # データ保持用
@@ -28,6 +28,14 @@ class RICSApp:
         self.processed_full = None
         self.roi_data = None
         self.acf_data = None
+        
+        # 表示用設定
+        self.current_frame_idx = -1 # -1: Average, 0~N: Specific Frame
+        self.total_frames = 0
+        
+        # ★ スケール固定用変数 (New)
+        self.fixed_ylim_x = None
+        self.fixed_ylim_y = None
         
         # ヒートマップ結果保持用
         self.heatmap_d_map = None
@@ -37,6 +45,10 @@ class RICSApp:
         self.heatmap_thread = None
         self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
+        
+        # リアルタイムプロット用データ共有変数
+        self.live_fit_data = None 
+        self.live_fit_lock = threading.Lock()
 
         # --- GUI変数 ---
         self.ma_window_var = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
@@ -52,7 +64,7 @@ class RICSApp:
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         
-        # ★ New: Auto Range Detect Checkbox
+        # Auto Range
         self.auto_range_var = tk.BooleanVar(value=False)
 
         # Heatmap設定
@@ -68,6 +80,9 @@ class RICSApp:
         self.n_var = tk.StringVar(value="---")
         self.result_text = tk.StringVar(value="Ready...")
         self.heatmap_status = tk.StringVar(value="Idle")
+        
+        # Frame Info Label
+        self.frame_info_var = tk.StringVar(value="No Data")
 
         # マウス操作用
         self.drag_lines = {}
@@ -82,7 +97,8 @@ class RICSApp:
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas = tk.Canvas(main_frame, width=380)
+        # Scrollable Canvas for Left Panel
+        self.canvas = tk.Canvas(main_frame, width=400)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
         
         self.scroll_inner = ttk.Frame(self.canvas, padding="10")
@@ -93,7 +109,10 @@ class RICSApp:
         
         scrollbar.pack(side=tk.LEFT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        
+        # Mac Scroll Fix
+        self.canvas.bind("<Enter>", self._bind_mouse_scroll)
+        self.canvas.bind("<Leave>", self._unbind_mouse_scroll)
 
         self.graph_frame = ttk.Frame(main_frame)
         self.graph_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -103,21 +122,42 @@ class RICSApp:
     def _on_frame_configure(self, event):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    def _on_mousewheel(self, event):
+    # --- Scroll Handling ---
+    def _bind_mouse_scroll(self, event):
         system = platform.system()
         if system == "Darwin":
-            delta = event.delta
-            if abs(delta) >= 1:
-                self.canvas.yview_scroll(int(-1 * delta), "units")
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_mac)
         else:
-            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_win)
+
+    def _unbind_mouse_scroll(self, event):
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel_mac(self, event):
+        delta = event.delta
+        if delta == 0: return
+        self.canvas.yview_scroll(int(-1 * delta), "units")
+
+    def _on_mousewheel_win(self, event):
+        self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
     def create_widgets(self, parent):
         # 1. Data Loading
         ttk.Label(parent, text="1. Data Loading", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         ttk.Button(parent, text="Load TIF Data", command=self.load_data).pack(fill=tk.X, pady=5)
-        self.file_label = ttk.Label(parent, text="No file loaded", wraplength=250)
+        self.file_label = ttk.Label(parent, text="No file loaded", wraplength=350)
         self.file_label.pack()
+        
+        # Frame Info & Slider
+        f_info = ttk.LabelFrame(parent, text="Frame Viewer")
+        f_info.pack(fill=tk.X, pady=5)
+        ttk.Label(f_info, textvariable=self.frame_info_var, foreground="blue").pack(anchor="w")
+        
+        self.frame_slider = tk.Scale(f_info, from_=0, to=1, orient=tk.HORIZONTAL, label="Frame Index", command=self.on_slider_change)
+        self.frame_slider.pack(fill=tk.X, padx=5)
+        self.frame_slider.configure(state="disabled")
+        
+        ttk.Button(f_info, text="Show Average Image", command=self.reset_to_average).pack(fill=tk.X, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
@@ -130,6 +170,9 @@ class RICSApp:
 
         roi_grp = ttk.LabelFrame(parent, text="ROI Config")
         roi_grp.pack(fill=tk.X, pady=5)
+        
+        # Full Image Button
+        ttk.Button(roi_grp, text="Select Full Image", command=self.set_full_roi).pack(fill=tk.X, pady=2)
         
         f_sz = ttk.Frame(roi_grp); f_sz.pack(fill=tk.X, pady=2)
         ttk.Label(f_sz, text="Size W:").pack(side=tk.LEFT)
@@ -159,7 +202,6 @@ class RICSApp:
         range_frame = ttk.LabelFrame(parent, text="Fitting Range")
         range_frame.pack(fill=tk.X, pady=5)
         
-        # Auto Range Checkbox
         ttk.Checkbutton(range_frame, text="Auto-Detect Fit Range (Monotonic)", variable=self.auto_range_var).pack(anchor="w", padx=5, pady=2)
         
         fr_x = ttk.Frame(range_frame); fr_x.pack(fill=tk.X)
@@ -247,7 +289,7 @@ class RICSApp:
 
         hm_btns = ttk.Frame(parent)
         hm_btns.pack(fill=tk.X, pady=5)
-        ttk.Button(hm_btns, text="Generate Heatmap", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(hm_btns, text="Generate Heatmap (Live Plot)", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Button(hm_btns, text="Stop", command=self.stop_heatmap).pack(side=tk.LEFT, padx=2)
         ttk.Button(parent, text="Save Heatmap Image", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
 
@@ -275,7 +317,7 @@ class RICSApp:
         )
         self.selector.set_active(False)
 
-    # --- Mouse Events (省略なし) ---
+    # --- Mouse Events ---
     def on_click(self, event):
         if event.inaxes in [self.ax_x, self.ax_y]:
             if self.drag_lines:
@@ -356,29 +398,37 @@ class RICSApp:
     # Helper: Auto Range Detection
     # =======================================================
     def detect_monotonic_decay_range(self, data_1d, min_len=3):
-        """
-        1次元配列(ピークから外側へ)において、単調減少が崩れる(増加に転じる)最初の位置を返す。
-        ノイズ対策として3点移動平均を使用。
-        """
         n = len(data_1d)
         if n < min_len + 2: return n
-        
-        # 3-point Moving Average
         smooth = np.convolve(data_1d, np.ones(3)/3, mode='valid')
-        # Difference
         diff = np.diff(smooth)
-        
-        # Find index where diff > 0 (Increasing)
-        # smooth[i] corresponds to roughly data[i+1]
         idx = np.where(diff > 0)[0]
         if len(idx) > 0:
-            # First increasing point found
             return idx[0] + 1
-            
         return n
 
     # =======================================================
-    # Heatmap Logic
+    # Full ROI & Frame Logic
+    # =======================================================
+    def set_full_roi(self):
+        if self.raw_stack is None: return
+        _, H, W = self.raw_stack.shape
+        self.roi_w_var.set(W)
+        self.roi_h_var.set(H)
+        self.roi_cx_var.set(W // 2)
+        self.roi_cy_var.set(H // 2)
+        self.update_processing_and_acf()
+
+    def on_slider_change(self, val):
+        self.current_frame_idx = int(val)
+        self.update_processing_and_acf()
+
+    def reset_to_average(self):
+        self.current_frame_idx = -1
+        self.update_processing_and_acf()
+
+    # =======================================================
+    # Heatmap Logic (Live Plot Added)
     # =======================================================
     def start_heatmap_thread(self):
         if self.processed_full is None:
@@ -397,13 +447,17 @@ class RICSApp:
         self.progress_val.set(0)
         self.heatmap_status.set("Initializing...")
         
+        # Init Live Data
+        with self.live_fit_lock:
+            self.live_fit_data = None
+        
         fit_params = {k: v.get() for k, v in self.entries.items()}
         fixed_params = {k: v.get() for k, v in self.checkvars.items()}
         
         omit_r = self.omit_radius_var.get()
         range_x = self.fit_range_x_var.get()
         range_y = self.fit_range_y_var.get()
-        auto_range = self.auto_range_var.get() # ★ Checkbox State
+        auto_range = self.auto_range_var.get()
         
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
@@ -457,26 +511,17 @@ class RICSApp:
                 dist_sq = SX.ravel()**2 + SY.ravel()**2
                 mask_omit = dist_sq <= (omit_r**2) if omit_r > 0 else np.zeros_like(dist_sq, dtype=bool)
                 
-                # ★ Auto Range Detection Logic ★
                 curr_range_x = range_x
                 curr_range_y = range_y
-                
                 if auto_range:
-                    # Detect valid range from ACF center
-                    # X profile (Right side)
                     x_profile = acf[sub_cy, sub_cx:]
                     rx_detected = self.detect_monotonic_decay_range(x_profile)
-                    
-                    # Y profile (Bottom side)
                     y_profile = acf[sub_cy:, sub_cx]
                     ry_detected = self.detect_monotonic_decay_range(y_profile)
-                    
-                    # Use detected range (limit by manual range is optional, here we overwrite)
                     curr_range_x = rx_detected
                     curr_range_y = ry_detected
 
                 mask_range = (np.abs(SX.ravel()) > curr_range_x) | (np.abs(SY.ravel()) > curr_range_y)
-                
                 mask_valid = ~(mask_omit | mask_range)
                 
                 x_fit = xdata[:, mask_valid]
@@ -493,6 +538,7 @@ class RICSApp:
                     ).ravel()
 
                 try:
+                    popt = None
                     if frees:
                         popt, _ = curve_fit(local_wrapper, x_fit, y_fit, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)), maxfev=600)
                         d_idx = frees.index("D") if "D" in frees else -1
@@ -504,24 +550,86 @@ class RICSApp:
                     else:
                         if "D" in fit_params:
                              d_map[y:min(H, y+step), x:min(W, x+step)] = fit_params["D"]
+
+                    # Store Data for Live Plot
+                    final_p = fit_params.copy()
+                    if popt is not None:
+                        for i, name in enumerate(frees): final_p[name] = popt[i]
+                    
+                    x_slice_vals = acf[sub_cy, :]
+                    y_slice_vals = acf[:, sub_cx]
+                    
+                    x_axis_points = np.vstack((sx_axis, np.zeros_like(sx_axis)))
+                    x_curve = model.rics_3d_equation(x_axis_points, **final_p, 
+                                                     pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME)
+                    
+                    y_axis_points = np.vstack((np.zeros_like(sy_axis), sy_axis))
+                    y_curve = model.rics_3d_equation(y_axis_points, **final_p, 
+                                                     pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME)
+                    
+                    with self.live_fit_lock:
+                        self.live_fit_data = {
+                            "sx_axis": sx_axis,
+                            "x_slice_vals": x_slice_vals,
+                            "x_curve": x_curve,
+                            "range_x": curr_range_x,
+                            "sy_axis": sy_axis,
+                            "y_slice_vals": y_slice_vals,
+                            "y_curve": y_curve,
+                            "range_y": curr_range_y,
+                            "omit_r": omit_r
+                        }
+
                 except: pass
 
         self.heatmap_d_map = d_map
 
     def monitor_heatmap_thread(self):
+        data_snapshot = None
+        with self.live_fit_lock:
+            if self.live_fit_data:
+                data_snapshot = self.live_fit_data.copy()
+                self.live_fit_data = None 
+
+        if data_snapshot:
+            self.update_live_plot(data_snapshot)
+
         if self.heatmap_thread.is_alive():
-            self.root.after(200, self.monitor_heatmap_thread)
+            self.root.after(100, self.monitor_heatmap_thread)
         else:
             self.progress_val.set(100)
             status = "Stopped." if self.stop_event.is_set() else "Completed."
             self.heatmap_status.set(status)
             self.plot_heatmap_result()
 
+    def update_live_plot(self, d):
+        self.ax_x.cla()
+        self.ax_y.cla()
+        
+        self.ax_x.plot(d["sx_axis"], d["x_slice_vals"], 'b.', ms=4, alpha=0.5)
+        self.ax_x.plot(d["sx_axis"], d["x_curve"], 'r-', lw=2)
+        self.ax_x.axvline(-d["range_x"], color='orange', ls='--')
+        self.ax_x.axvline(d["range_x"], color='orange', ls='--')
+        self.ax_x.set_title("Live X Fit")
+        self.ax_x.grid(True)
+        
+        self.ax_y.plot(d["sy_axis"], d["y_slice_vals"], 'b.', ms=4, alpha=0.5)
+        self.ax_y.plot(d["sy_axis"], d["y_curve"], 'r-', lw=2)
+        self.ax_y.axvline(-d["range_y"], color='orange', ls='--')
+        self.ax_y.axvline(d["range_y"], color='orange', ls='--')
+        self.ax_y.set_title("Live Y Fit")
+        self.ax_y.grid(True)
+        
+        # ★ Apply Fixed Scale if available
+        if self.fixed_ylim_x is not None: self.ax_x.set_ylim(self.fixed_ylim_x)
+        if self.fixed_ylim_y is not None: self.ax_y.set_ylim(self.fixed_ylim_y)
+        
+        self.canvas_fig.draw()
+
     def stop_heatmap(self):
         self.stop_event.set()
 
     def plot_heatmap_result(self):
-        """別ウィンドウにヒートマップを表示 (Robust)"""
         if self.heatmap_d_map is None: return
 
         if self.hm_window is None or not tk.Toplevel.winfo_exists(self.hm_window):
@@ -538,12 +646,10 @@ class RICSApp:
         else:
             self.hm_window.lift()
 
-        # Safe redraw
         self.hm_fig.clf()
         self.hm_ax = self.hm_fig.add_subplot(111)
 
         display_map = self.heatmap_d_map.copy()
-        
         valid_mask = ~np.isnan(display_map)
         if not np.any(valid_mask):
             self.hm_ax.text(0.5, 0.5, "No valid fitting results.", ha='center', va='center')
@@ -556,10 +662,7 @@ class RICSApp:
             valid_data = display_map[valid_mask]
             if len(valid_data) > 0:
                 vmin = np.nanmin(valid_data)
-                try:
-                    perc_val = self.hm_percentile_var.get()
-                    if perc_val < 0: perc_val = 0
-                    if perc_val > 100: perc_val = 100
+                try: perc_val = self.hm_percentile_var.get()
                 except: perc_val = 95.0
                 vmax = np.nanpercentile(valid_data, perc_val)
         else:
@@ -573,13 +676,10 @@ class RICSApp:
             if vmin == vmax: vmax = vmin + 1e-9
 
         interp = self.hm_interp_var.get()
-
         im = self.hm_ax.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
         self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
         self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
-        
         self.hm_canvas.draw()
-
 
     def save_heatmap_image(self):
         if self.heatmap_d_map is None: return
@@ -588,16 +688,13 @@ class RICSApp:
             try:
                 fig_temp = plt.figure(figsize=(6, 5))
                 ax_temp = fig_temp.add_subplot(111)
-                
                 display_map = self.heatmap_d_map.copy()
-                
                 vmin, vmax = None, None
                 if self.hm_autoscale_var.get():
                     valid = display_map[~np.isnan(display_map)]
                     if len(valid) > 0:
                         vmin = np.nanmin(valid)
-                        try:
-                            perc_val = self.hm_percentile_var.get()
+                        try: perc_val = self.hm_percentile_var.get()
                         except: perc_val = 95.0
                         vmax = np.nanpercentile(valid, perc_val)
                 else:
@@ -605,7 +702,6 @@ class RICSApp:
                     if len(valid) > 0:
                         vmin = np.nanmin(valid)
                         vmax = self.hm_max_val_var.get()
-
                 interp = self.hm_interp_var.get()
                 im = ax_temp.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
                 ax_temp.set_title("Diffusion Map")
@@ -622,7 +718,15 @@ class RICSApp:
         try:
             self.file_label.config(text=os.path.basename(filepath))
             self.raw_stack = prep.load_tiff(filepath)
-            _, H, W = self.raw_stack.shape
+            
+            # Frame Info
+            self.total_frames, H, W = self.raw_stack.shape
+            self.frame_info_var.set(f"Total Frames: {self.total_frames} ({W}x{H})")
+            
+            # Enable Slider
+            self.frame_slider.configure(state="normal", to=self.total_frames-1)
+            self.current_frame_idx = -1
+            
             self.roi_cx_var.set(W // 2); self.roi_cy_var.set(H // 2)
             self.selector.set_active(True)
             self.update_processing_and_acf()
@@ -712,10 +816,19 @@ class RICSApp:
         if self.processed_full is None or self.acf_data is None:
             self.canvas_fig.draw(); return
 
-        avg_img = np.mean(self.processed_full, axis=0)
-        self.ax_img.imshow(avg_img, cmap='gray')
-        self.ax_img.set_title("Draw(Drag) / Move(Click) ROI")
+        # Display Logic
+        if self.current_frame_idx == -1:
+            display_img = np.mean(self.processed_full, axis=0)
+            title = "Average Image"
+        else:
+            idx = min(max(0, self.current_frame_idx), self.total_frames-1)
+            display_img = self.processed_full[idx]
+            title = f"Frame {idx}/{self.total_frames-1}"
+
+        self.ax_img.imshow(display_img, cmap='gray')
+        self.ax_img.set_title(f"{title} (Drag/Click to Move ROI)")
         self.ax_img.axis('off')
+        
         x, y, w, h = self.roi_coords
         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
         self.ax_img.add_patch(rect)
@@ -754,6 +867,10 @@ class RICSApp:
         mask_3d = (X_grid**2 + Y_grid**2) > (omit_r**2) if omit_r>0 else True
         vz = self.acf_data[mask_3d]
         if len(vz)>0: self.ax_3d.set_zlim(np.min(vz), np.max(vz))
+        
+        # Save Scale
+        self.fixed_ylim_x = self.ax_x.get_ylim()
+        self.fixed_ylim_y = self.ax_y.get_ylim()
         
         self.canvas_fig.draw()
 
