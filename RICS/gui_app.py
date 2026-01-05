@@ -20,7 +20,7 @@ from src import model
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v15.0 (Fixed Scale Live Plot)")
+        self.root.title("RICS Analysis App v17.1 (Fix: Auto-Detect on Refresh)")
         self.root.geometry("1400x1000")
 
         # データ保持用
@@ -30,10 +30,8 @@ class RICSApp:
         self.acf_data = None
         
         # 表示用設定
-        self.current_frame_idx = -1 # -1: Average, 0~N: Specific Frame
+        self.current_frame_idx = -1
         self.total_frames = 0
-        
-        # ★ スケール固定用変数 (New)
         self.fixed_ylim_x = None
         self.fixed_ylim_y = None
         
@@ -46,32 +44,29 @@ class RICSApp:
         self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
         
-        # リアルタイムプロット用データ共有変数
+        # リアルタイムプロット用
         self.live_fit_data = None 
         self.live_fit_lock = threading.Lock()
 
         # --- GUI変数 ---
+        # Scan Params
+        self.pixel_size_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0) 
+        self.pixel_dwell_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
+        self.line_time_var = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0) 
+
         self.ma_window_var = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
-        
-        # ROI設定
         self.roi_w_var = tk.IntVar(value=cfg.ROI_SIZE)
         self.roi_h_var = tk.IntVar(value=cfg.ROI_SIZE)
         self.roi_cx_var = tk.IntVar(value=128)
         self.roi_cy_var = tk.IntVar(value=128)
         
-        # Omit & Range
         self.omit_radius_var = tk.DoubleVar(value=0.0)
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
-        
-        # Auto Range
         self.auto_range_var = tk.BooleanVar(value=False)
 
-        # Heatmap設定
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
-        
-        # Visualization Config
         self.hm_autoscale_var = tk.BooleanVar(value=True)
         self.hm_percentile_var = tk.DoubleVar(value=95.0)
         self.hm_max_val_var = tk.DoubleVar(value=100.0)
@@ -81,10 +76,7 @@ class RICSApp:
         self.result_text = tk.StringVar(value="Ready...")
         self.heatmap_status = tk.StringVar(value="Idle")
         
-        # Frame Info Label
         self.frame_info_var = tk.StringVar(value="No Data")
-
-        # マウス操作用
         self.drag_lines = {}
         self.dragging_item = None
         self.selector = None
@@ -97,7 +89,6 @@ class RICSApp:
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Scrollable Canvas for Left Panel
         self.canvas = tk.Canvas(main_frame, width=400)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
         
@@ -110,7 +101,6 @@ class RICSApp:
         scrollbar.pack(side=tk.LEFT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
         
-        # Mac Scroll Fix
         self.canvas.bind("<Enter>", self._bind_mouse_scroll)
         self.canvas.bind("<Leave>", self._unbind_mouse_scroll)
 
@@ -122,7 +112,6 @@ class RICSApp:
     def _on_frame_configure(self, event):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    # --- Scroll Handling ---
     def _bind_mouse_scroll(self, event):
         system = platform.system()
         if system == "Darwin":
@@ -148,7 +137,6 @@ class RICSApp:
         self.file_label = ttk.Label(parent, text="No file loaded", wraplength=350)
         self.file_label.pack()
         
-        # Frame Info & Slider
         f_info = ttk.LabelFrame(parent, text="Frame Viewer")
         f_info.pack(fill=tk.X, pady=5)
         ttk.Label(f_info, textvariable=self.frame_info_var, foreground="blue").pack(anchor="w")
@@ -161,8 +149,30 @@ class RICSApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 2. ROI & Preprocessing
-        ttk.Label(parent, text="2. ROI & Preprocessing", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        # 2. Scan Parameters Input
+        ttk.Label(parent, text="2. Scan Parameters", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        scan_grp = ttk.LabelFrame(parent, text="Microscope Settings")
+        scan_grp.pack(fill=tk.X, pady=5)
+        
+        row_ps = ttk.Frame(scan_grp); row_ps.pack(fill=tk.X, pady=2)
+        ttk.Label(row_ps, text="Pixel Size:").pack(side=tk.LEFT)
+        ttk.Entry(row_ps, textvariable=self.pixel_size_var, width=8).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_ps, text="nm").pack(side=tk.LEFT)
+        
+        row_pd = ttk.Frame(scan_grp); row_pd.pack(fill=tk.X, pady=2)
+        ttk.Label(row_pd, text="Pixel Dwell:").pack(side=tk.LEFT)
+        ttk.Entry(row_pd, textvariable=self.pixel_dwell_var, width=8).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_pd, text="us").pack(side=tk.LEFT)
+        
+        row_lt = ttk.Frame(scan_grp); row_lt.pack(fill=tk.X, pady=2)
+        ttk.Label(row_lt, text="Line Time:").pack(side=tk.LEFT)
+        ttk.Entry(row_lt, textvariable=self.line_time_var, width=8).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_lt, text="ms").pack(side=tk.LEFT)
+
+        ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
+
+        # 3. ROI & Preprocessing
+        ttk.Label(parent, text="3. ROI & Preprocessing", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
         bg_frame = ttk.Frame(parent); bg_frame.pack(fill=tk.X, pady=2)
         ttk.Label(bg_frame, text="Mov.Avg:").pack(side=tk.LEFT)
@@ -171,7 +181,6 @@ class RICSApp:
         roi_grp = ttk.LabelFrame(parent, text="ROI Config")
         roi_grp.pack(fill=tk.X, pady=5)
         
-        # Full Image Button
         ttk.Button(roi_grp, text="Select Full Image", command=self.set_full_roi).pack(fill=tk.X, pady=2)
         
         f_sz = ttk.Frame(roi_grp); f_sz.pack(fill=tk.X, pady=2)
@@ -190,15 +199,14 @@ class RICSApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 3. Fitting Range & Omit
-        ttk.Label(parent, text="3. Range & Omit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        # 4. Fitting Range & Omit
+        ttk.Label(parent, text="4. Range & Omit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
 
         omit_frame = ttk.Frame(parent); omit_frame.pack(fill=tk.X, pady=2)
         ttk.Label(omit_frame, text="Omit Radius:", foreground="red").pack(side=tk.LEFT)
         ttk.Entry(omit_frame, textvariable=self.omit_radius_var, width=5).pack(side=tk.LEFT, padx=5)
         ttk.Label(omit_frame, text="px").pack(side=tk.LEFT)
 
-        # Range Frame
         range_frame = ttk.LabelFrame(parent, text="Fitting Range")
         range_frame.pack(fill=tk.X, pady=5)
         
@@ -242,21 +250,21 @@ class RICSApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 4. Fitting
-        ttk.Label(parent, text="4. Single Point Fitting", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        # 5. Fitting
+        ttk.Label(parent, text="5. Single Point Fitting", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         ttk.Button(parent, text="Run Fitting (Selected ROI)", command=self.run_fitting).pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.result_text, relief="sunken", padding=5).pack(fill=tk.X)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 5. Output
-        ttk.Label(parent, text="5. Output", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        # 6. Output
+        ttk.Label(parent, text="6. Output", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         ttk.Button(parent, text="Save Graphs as JPEG", command=self.save_graphs).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 6. Heatmap
-        ttk.Label(parent, text="6. Heatmap Analysis", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        # 7. Heatmap
+        ttk.Label(parent, text="7. Heatmap Analysis", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
         hm_conf = ttk.Frame(parent)
         hm_conf.pack(fill=tk.X, pady=2)
@@ -317,7 +325,7 @@ class RICSApp:
         )
         self.selector.set_active(False)
 
-    # --- Mouse Events ---
+    # --- Mouse Events (省略なし) ---
     def on_click(self, event):
         if event.inaxes in [self.ax_x, self.ax_y]:
             if self.drag_lines:
@@ -459,15 +467,22 @@ class RICSApp:
         range_y = self.fit_range_y_var.get()
         auto_range = self.auto_range_var.get()
         
+        # ★ Get Scan Params from GUI & Convert Units
+        scan_params = {
+            'pixel_size': self.pixel_size_var.get() * 1e-3,   # nm -> um
+            'pixel_dwell': self.pixel_dwell_var.get() * 1e-6, # us -> s
+            'line_time': self.line_time_var.get() * 1e-3,     # ms -> s
+        }
+
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
-            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range)
+            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range, scan_params)
         )
         self.heatmap_thread.daemon = True
         self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range):
+    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range, scan_params):
         T, H, W = data.shape
         half_w = win_size // 2
         
@@ -534,7 +549,9 @@ class RICSApp:
                     for i, name in enumerate(frees): p[name] = args[i]
                     return model.rics_3d_equation(
                         xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"],
-                        pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME
+                        pixel_size=scan_params['pixel_size'], 
+                        pixel_dwell=scan_params['pixel_dwell'], 
+                        line_time=scan_params['line_time']
                     ).ravel()
 
                 try:
@@ -561,11 +578,15 @@ class RICSApp:
                     
                     x_axis_points = np.vstack((sx_axis, np.zeros_like(sx_axis)))
                     x_curve = model.rics_3d_equation(x_axis_points, **final_p, 
-                                                     pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME)
+                                                     pixel_size=scan_params['pixel_size'], 
+                                                     pixel_dwell=scan_params['pixel_dwell'], 
+                                                     line_time=scan_params['line_time'])
                     
                     y_axis_points = np.vstack((np.zeros_like(sy_axis), sy_axis))
                     y_curve = model.rics_3d_equation(y_axis_points, **final_p, 
-                                                     pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME)
+                                                     pixel_size=scan_params['pixel_size'], 
+                                                     pixel_dwell=scan_params['pixel_dwell'], 
+                                                     line_time=scan_params['line_time'])
                     
                     with self.live_fit_lock:
                         self.live_fit_data = {
@@ -620,7 +641,6 @@ class RICSApp:
         self.ax_y.set_title("Live Y Fit")
         self.ax_y.grid(True)
         
-        # ★ Apply Fixed Scale if available
         if self.fixed_ylim_x is not None: self.ax_x.set_ylim(self.fixed_ylim_x)
         if self.fixed_ylim_y is not None: self.ax_y.set_ylim(self.fixed_ylim_y)
         
@@ -780,11 +800,20 @@ class RICSApp:
         x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
         if len(y_fit) == 0: return
 
+        # ★ Use Params from GUI & Convert Units
+        scan_params = {
+            'pixel_size': self.pixel_size_var.get() * 1e-3,   # nm -> um
+            'pixel_dwell': self.pixel_dwell_var.get() * 1e-6, # us -> s
+            'line_time': self.line_time_var.get() * 1e-3,     # ms -> s
+        }
+
         def fit_wrapper(xy, *args):
             p = vals.copy()
             for i, name in enumerate(frees): p[name] = args[i]
             return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"],
-                                          pixel_size=cfg.PIXEL_SIZE, pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME).ravel()
+                                          pixel_size=scan_params['pixel_size'], 
+                                          pixel_dwell=scan_params['pixel_dwell'], 
+                                          line_time=scan_params['line_time']).ravel()
         try:
             if frees:
                 popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)))
@@ -794,8 +823,10 @@ class RICSApp:
             else:
                 final_p = vals
             
-            fit_map = model.rics_3d_equation(xdata_flat, **final_p, pixel_size=cfg.PIXEL_SIZE, 
-                                             pixel_dwell=cfg.PIXEL_DWELL_TIME, line_time=cfg.LINE_TIME).reshape(H, W)
+            fit_map = model.rics_3d_equation(xdata_flat, **final_p, 
+                                             pixel_size=scan_params['pixel_size'], 
+                                             pixel_dwell=scan_params['pixel_dwell'], 
+                                             line_time=scan_params['line_time']).reshape(H, W)
             self.plot_results(fit_map)
             g0 = final_p["G0"]
             self.n_var.set(f"{1/g0:.2f}" if g0 > 1e-9 else "Inf")
@@ -816,7 +847,6 @@ class RICSApp:
         if self.processed_full is None or self.acf_data is None:
             self.canvas_fig.draw(); return
 
-        # Display Logic
         if self.current_frame_idx == -1:
             display_img = np.mean(self.processed_full, axis=0)
             title = "Average Image"
@@ -835,6 +865,16 @@ class RICSApp:
 
         H, W = self.acf_data.shape
         cy, cx = H // 2, W // 2
+        
+        # ★ Fix: Apply Auto-Detect logic if checked
+        if self.auto_range_var.get():
+            x_profile = self.acf_data[cy, cx:]
+            rx_new = self.detect_monotonic_decay_range(x_profile)
+            y_profile = self.acf_data[cy:, cx]
+            ry_new = self.detect_monotonic_decay_range(y_profile)
+            self.fit_range_x_var.set(rx_new)
+            self.fit_range_y_var.set(ry_new)
+
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]
         y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
@@ -868,7 +908,6 @@ class RICSApp:
         vz = self.acf_data[mask_3d]
         if len(vz)>0: self.ax_3d.set_zlim(np.min(vz), np.max(vz))
         
-        # Save Scale
         self.fixed_ylim_x = self.ax_x.get_ylim()
         self.fixed_ylim_y = self.ax_y.get_ylim()
         
