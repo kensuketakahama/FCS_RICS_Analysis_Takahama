@@ -19,3 +19,8 @@ Desktop.ini
 env/
 venv/
 ENV/
+
+# ---app---
+build/
+dist/
+RICS_Analysis_App.spec
