@@ -10,6 +10,14 @@ import os
 import platform
 import threading
 import math
+import subprocess # For caffeinate
+
+# ★ Mac App Nap対策 (バックグラウンドでの速度低下防止)
+try:
+    import appnope
+    appnope.nope() # App Napを無効化
+except ImportError:
+    pass
 
 # 自作モジュールのインポート
 import config as cfg
@@ -20,8 +28,19 @@ from src import model
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v17.1 (Fix: Auto-Detect on Refresh)")
+        self.root.title("RICS Analysis App v17.2 (Mac Dock & Sleep Fix)")
         self.root.geometry("1400x1000")
+
+        # ★ Mac Dock Click Fix (最小化からの復帰)
+        if platform.system() == "Darwin":
+            try:
+                def on_dock_click(*args):
+                    self.root.deiconify() # 最小化解除
+                    self.root.lift()      # 最前面へ
+                # macOSのReopenApplicationイベントにバインド
+                self.root.createcommand("::tk::mac::ReopenApplication", on_dock_click)
+            except Exception:
+                pass
 
         # データ保持用
         self.raw_stack = None       
@@ -44,12 +63,15 @@ class RICSApp:
         self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
         
+        # ★ Sleep防止プロセス管理
+        self.caffeinate_process = None
+        
         # リアルタイムプロット用
         self.live_fit_data = None 
         self.live_fit_lock = threading.Lock()
 
         # --- GUI変数 ---
-        # Scan Params
+        # Scan Params (v17 Feature)
         self.pixel_size_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0) 
         self.pixel_dwell_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
         self.line_time_var = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0) 
@@ -149,7 +171,7 @@ class RICSApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
 
-        # 2. Scan Parameters Input
+        # 2. Scan Parameters Input (v17 Feature)
         ttk.Label(parent, text="2. Scan Parameters", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         scan_grp = ttk.LabelFrame(parent, text="Microscope Settings")
         scan_grp.pack(fill=tk.X, pady=5)
@@ -451,6 +473,12 @@ class RICSApp:
         
         roi_coords = self.roi_coords
         
+        # ★ Start Caffeinate (Prevent Idle Sleep)
+        if platform.system() == "Darwin":
+            try:
+                self.caffeinate_process = subprocess.Popen(['caffeinate', '-i'])
+            except Exception: pass
+
         self.stop_event.clear()
         self.progress_val.set(0)
         self.heatmap_status.set("Initializing...")
@@ -467,7 +495,7 @@ class RICSApp:
         range_y = self.fit_range_y_var.get()
         auto_range = self.auto_range_var.get()
         
-        # ★ Get Scan Params from GUI & Convert Units
+        # Get Scan Params from GUI & Convert Units
         scan_params = {
             'pixel_size': self.pixel_size_var.get() * 1e-3,   # nm -> um
             'pixel_dwell': self.pixel_dwell_var.get() * 1e-6, # us -> s
@@ -618,6 +646,11 @@ class RICSApp:
         if self.heatmap_thread.is_alive():
             self.root.after(100, self.monitor_heatmap_thread)
         else:
+            # ★ Kill Caffeinate
+            if self.caffeinate_process:
+                self.caffeinate_process.terminate()
+                self.caffeinate_process = None
+                
             self.progress_val.set(100)
             status = "Stopped." if self.stop_event.is_set() else "Completed."
             self.heatmap_status.set(status)
