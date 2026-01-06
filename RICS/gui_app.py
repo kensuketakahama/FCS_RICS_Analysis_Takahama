@@ -26,91 +26,291 @@ from src import preprocessing as prep
 from src import calculation as calc
 from src import model
 
+# =============================================================================
+# ★ Batch Configuration Window Class (Inside gui_app.py)
+# =============================================================================
+class BatchConfigWindow(tk.Toplevel):
+    def __init__(self, master, file_list, root_dir, execute_callback):
+        super().__init__(master)
+        self.title(f"Batch Processing Config - {len(file_list)} files found")
+        self.geometry("1200x800")
+        self.file_list = file_list
+        self.root_dir = root_dir
+        self.execute_callback = execute_callback
+        
+        # State variables
+        self.current_preview_data = None
+        self.roi_coords = (0, 0, 0, 0) # x, y, w, h
+        
+        # UI Variables (Default from config/app defaults)
+        self.ma_win = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
+        self.px_size = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0)
+        self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
+        self.line_time = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0)
+        
+        self.fit_D = tk.DoubleVar(value=10.0)
+        self.fit_G0 = tk.DoubleVar(value=0.01)
+        self.fit_w0 = tk.DoubleVar(value=cfg.W0)
+        self.fit_wz = tk.DoubleVar(value=cfg.WZ)
+        self.fix_w0 = tk.BooleanVar(value=True)
+        self.fix_wz = tk.BooleanVar(value=True)
+        
+        self.hm_win = tk.IntVar(value=32)
+        self.hm_step = tk.IntVar(value=4)
+        self.omit_r = tk.DoubleVar(value=0.0)
+        self.range_x = tk.IntVar(value=16)
+        self.range_y = tk.IntVar(value=16)
+        self.auto_range = tk.BooleanVar(value=False)
+        
+        self.hm_autoscale = tk.BooleanVar(value=True)
+        self.hm_percentile = tk.DoubleVar(value=95.0)
+        self.hm_max = tk.DoubleVar(value=100.0)
+        self.hm_interp = tk.StringVar(value="nearest")
+
+        self._create_layout()
+        
+        # Select first file by default
+        if self.file_list:
+            self.file_lb.selection_set(0)
+            self._on_file_select(None)
+
+    def _create_layout(self):
+        # --- Left: File List ---
+        left_frame = ttk.Frame(self, width=300, padding=5)
+        left_frame.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Label(left_frame, text="Files Found (Relative Path):", font=("bold")).pack(anchor="w")
+        
+        sb = ttk.Scrollbar(left_frame)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        sb_x = ttk.Scrollbar(left_frame, orient=tk.HORIZONTAL)
+        sb_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.file_lb = tk.Listbox(left_frame, yscrollcommand=sb.set, xscrollcommand=sb_x.set, selectmode=tk.SINGLE, width=40)
+        self.file_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.config(command=self.file_lb.yview)
+        sb_x.config(command=self.file_lb.xview)
+        
+        for f in self.file_list:
+            try:
+                rel_path = os.path.relpath(f, self.root_dir)
+            except ValueError:
+                rel_path = os.path.basename(f)
+            self.file_lb.insert(tk.END, rel_path)
+            
+        self.file_lb.bind('<<ListboxSelect>>', self._on_file_select)
+
+        # --- Center: Preview & ROI ---
+        center_frame = ttk.Frame(self, padding=5)
+        center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Label(center_frame, text="Preview & ROI Selection (Applied to ALL)", font=("bold")).pack(anchor="w")
+        
+        self.fig = plt.Figure(figsize=(5, 5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=center_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        self.selector = RectangleSelector(
+            self.ax, self._on_select_roi, useblit=True, button=[1], 
+            minspanx=5, minspany=5, spancoords='pixels', interactive=True,
+            props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True)
+        )
+
+        # --- Right: Parameters ---
+        right_frame = ttk.Frame(self, width=300, padding=10)
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Params Group
+        p_grp = ttk.LabelFrame(right_frame, text="1. Pre-process & Scan")
+        p_grp.pack(fill=tk.X, pady=5)
+        self._add_entry(p_grp, "Mov.Avg:", self.ma_win)
+        self._add_entry(p_grp, "Pixel Size (nm):", self.px_size)
+        self._add_entry(p_grp, "Pixel Dwell (us):", self.px_dwell)
+        self._add_entry(p_grp, "Line Time (ms):", self.line_time)
+        
+        # Fit Group
+        f_grp = ttk.LabelFrame(right_frame, text="2. Fitting Initials")
+        f_grp.pack(fill=tk.X, pady=5)
+        self._add_entry(f_grp, "D (um2/s):", self.fit_D)
+        self._add_entry(f_grp, "G0:", self.fit_G0)
+        self._add_entry(f_grp, "w0 (um):", self.fit_w0, self.fix_w0)
+        self._add_entry(f_grp, "wz (um):", self.fit_wz, self.fix_wz)
+        
+        # Heatmap Group
+        h_grp = ttk.LabelFrame(right_frame, text="3. Heatmap Settings")
+        h_grp.pack(fill=tk.X, pady=5)
+        self._add_entry(h_grp, "Win Size:", self.hm_win)
+        self._add_entry(h_grp, "Step:", self.hm_step)
+        self._add_entry(h_grp, "Omit R (px):", self.omit_r)
+        self._add_entry(h_grp, "Range X (px):", self.range_x)
+        self._add_entry(h_grp, "Range Y (px):", self.range_y)
+        ttk.Checkbutton(h_grp, text="Auto-Detect Range", variable=self.auto_range).pack(anchor="w")
+        
+        # Output Group
+        o_grp = ttk.LabelFrame(right_frame, text="4. Output Settings")
+        o_grp.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(o_grp, text="Auto Scale (%)", variable=self.hm_autoscale).pack(anchor="w")
+        self._add_entry(o_grp, "Percentile:", self.hm_percentile)
+        self._add_entry(o_grp, "Max D:", self.hm_max)
+        ttk.Label(o_grp, text="Interpolation:").pack(anchor="w")
+        ttk.Combobox(o_grp, textvariable=self.hm_interp, values=["nearest", "bicubic", "bilinear"]).pack(fill=tk.X)
+
+        # Run Button
+        ttk.Button(right_frame, text="START BATCH ANALYSIS", command=self._on_run).pack(fill=tk.X, pady=20)
+
+    def _add_entry(self, parent, label, var, check_var=None):
+        f = ttk.Frame(parent)
+        f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=label, width=15).pack(side=tk.LEFT)
+        ttk.Entry(f, textvariable=var, width=8).pack(side=tk.LEFT)
+        if check_var:
+            ttk.Checkbutton(f, text="Fix", variable=check_var).pack(side=tk.LEFT, padx=5)
+
+    def _on_file_select(self, event):
+        idx = self.file_lb.curselection()
+        if not idx: return
+        fpath = self.file_list[idx[0]]
+        
+        try:
+            # ★ Robust loading for preview to avoid "too many values to unpack"
+            raw = prep.load_tiff(fpath)
+            
+            # 次元削減処理 (4D -> 3D -> 2D)
+            if raw.ndim >= 4:
+                raw = raw[:, 0, ...] # 最初のチャンネルを取得
+            
+            if raw.ndim == 3:
+                # (T, H, W) -> 時間平均 (H, W)
+                self.current_preview_data = np.mean(raw, axis=0)
+            elif raw.ndim == 2:
+                # (H, W) -> そのまま
+                self.current_preview_data = raw
+            else:
+                raise ValueError(f"Unexpected dimension: {raw.ndim}")
+
+            H, W = self.current_preview_data.shape
+            if self.roi_coords == (0, 0, 0, 0):
+                self.roi_coords = (0, 0, W, H) # Default Full
+                
+            self._redraw_preview()
+        except Exception as e:
+            print(f"Preview Error: {e}")
+
+    def _on_select_roi(self, eclick, erelease):
+        x1, y1 = int(eclick.xdata), int(eclick.ydata)
+        x2, y2 = int(erelease.xdata), int(erelease.ydata)
+        xmin, xmax = sorted([x1, x2])
+        ymin, ymax = sorted([y1, y2])
+        self.roi_coords = (xmin, ymin, xmax-xmin, ymax-ymin)
+        self._redraw_preview()
+
+    def _redraw_preview(self):
+        if self.current_preview_data is None: return
+        self.ax.cla()
+        self.ax.imshow(self.current_preview_data, cmap='gray')
+        self.ax.set_title("Draw ROI (Applied to ALL files)")
+        
+        x, y, w, h = self.roi_coords
+        rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
+        self.ax.add_patch(rect)
+        self.canvas.draw()
+
+    def _on_run(self):
+        # Gather all parameters into a dictionary
+        params = {
+            'mov_avg': self.ma_win.get(),
+            'scan_params': {
+                'pixel_size': self.px_size.get() * 1e-3,
+                'pixel_dwell': self.px_dwell.get() * 1e-6,
+                'line_time': self.line_time.get() * 1e-3,
+            },
+            'fit_params': {
+                "D": self.fit_D.get(), "G0": self.fit_G0.get(),
+                "w0": self.fit_w0.get(), "wz": self.fit_wz.get()
+            },
+            'fixed_params': {
+                "w0": self.fix_w0.get(), "wz": self.fix_wz.get(),
+                "D": False, "G0": False
+            },
+            'heatmap': {
+                'win': self.hm_win.get(), 'step': self.hm_step.get(),
+                'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
+                'auto_range': self.auto_range.get()
+            },
+            'roi': self.roi_coords,
+            'output': {
+                'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(),
+                'max': self.hm_max.get(), 'interp': self.hm_interp.get()
+            }
+        }
+        
+        self.execute_callback(self.file_list, params)
+        self.destroy()
+
+
+# =============================================================================
+# ★ Main Application
+# =============================================================================
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v19.0 (Visual Batch Processing)")
+        self.root.title("RICS Analysis App v20.0 (Batch Window Integration)")
         self.root.geometry("1400x1000")
 
-        # ★ Mac Dock Click Fix
+        # Mac Dock Click Fix
         if platform.system() == "Darwin":
             try:
                 def on_dock_click(*args):
-                    self.root.deiconify()
-                    self.root.lift()
+                    self.root.deiconify(); self.root.lift()
                 self.root.createcommand("::tk::mac::ReopenApplication", on_dock_click)
-            except Exception:
-                pass
+            except: pass
 
-        # データ保持用
-        self.raw_stack = None       
-        self.processed_full = None
-        self.roi_data = None
-        self.acf_data = None
+        # Data holders
+        self.raw_stack = None; self.processed_full = None
+        self.roi_data = None; self.acf_data = None
         self.current_file_path = None
+        self.current_frame_idx = -1; self.total_frames = 0
+        self.fixed_ylim_x = None; self.fixed_ylim_y = None
         
-        # 表示用設定
-        self.current_frame_idx = -1
-        self.total_frames = 0
-        self.fixed_ylim_x = None
-        self.fixed_ylim_y = None
-        
-        # ヒートマップ結果保持用
-        self.heatmap_d_map = None
-        self.hm_window = None 
-        
-        # スレッド制御用
-        self.heatmap_thread = None
-        self.stop_event = threading.Event()
+        self.heatmap_d_map = None; self.hm_window = None 
+        self.heatmap_thread = None; self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
-        
-        # Sleep防止プロセス管理
         self.caffeinate_process = None
+        self.live_fit_data = None; self.live_fit_lock = threading.Lock()
         
-        # リアルタイムプロット用
-        self.live_fit_data = None 
-        self.live_fit_lock = threading.Lock()
-        
-        # ★ Batch State
+        # Batch State
         self.is_batch_running = False
         self.batch_files = []
         self.batch_index = 0
+        self.batch_params = None 
         self.batch_stop_req = False
 
-        # --- GUI変数 ---
+        # GUI Variables (Main Window)
         self.pixel_size_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0) 
         self.pixel_dwell_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
         self.line_time_var = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0) 
-
         self.ma_window_var = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
         self.roi_w_var = tk.IntVar(value=cfg.ROI_SIZE)
         self.roi_h_var = tk.IntVar(value=cfg.ROI_SIZE)
         self.roi_cx_var = tk.IntVar(value=128)
         self.roi_cy_var = tk.IntVar(value=128)
-        
         self.omit_radius_var = tk.DoubleVar(value=0.0)
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.auto_range_var = tk.BooleanVar(value=False)
-
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
         self.hm_autoscale_var = tk.BooleanVar(value=True)
         self.hm_percentile_var = tk.DoubleVar(value=95.0)
         self.hm_max_val_var = tk.DoubleVar(value=100.0)
         self.hm_interp_var = tk.StringVar(value="nearest")
-
         self.n_var = tk.StringVar(value="---")
         self.result_text = tk.StringVar(value="Ready...")
         self.heatmap_status = tk.StringVar(value="Idle")
-        
         self.frame_info_var = tk.StringVar(value="No Data")
-        self.batch_info_var = tk.StringVar(value="Batch: Idle") # Batch Info
+        self.batch_info_var = tk.StringVar(value="Batch: Idle")
         
-        self.drag_lines = {}
-        self.dragging_item = None
-        self.selector = None
-        self.press_xy = None
+        self.drag_lines = {}; self.dragging_item = None
+        self.selector = None; self.press_xy = None
 
         self.create_layout()
         self.setup_plots()
@@ -118,220 +318,128 @@ class RICSApp:
     def create_layout(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
-
         self.canvas = tk.Canvas(main_frame, width=400)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
-        
         self.scroll_inner = ttk.Frame(self.canvas, padding="10")
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scroll_inner, anchor="nw")
-        
-        self.scroll_inner.bind("<Configure>", self._on_frame_configure)
+        self.scroll_inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.configure(yscrollcommand=scrollbar.set)
-        
         scrollbar.pack(side=tk.LEFT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
-        
-        self.canvas.bind("<Enter>", self._bind_mouse_scroll)
-        self.canvas.bind("<Leave>", self._unbind_mouse_scroll)
-
         self.graph_frame = ttk.Frame(main_frame)
         self.graph_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
+        self.canvas.bind("<Enter>", self._bind_mouse_scroll)
+        self.canvas.bind("<Leave>", self._unbind_mouse_scroll)
         self.create_widgets(self.scroll_inner)
 
-    def _on_frame_configure(self, event):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
     def _bind_mouse_scroll(self, event):
-        system = platform.system()
-        if system == "Darwin":
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_mac)
-        else:
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_win)
-
-    def _unbind_mouse_scroll(self, event):
-        self.canvas.unbind_all("<MouseWheel>")
-
-    def _on_mousewheel_mac(self, event):
-        delta = event.delta
-        if delta == 0: return
-        self.canvas.yview_scroll(int(-1 * delta), "units")
-
-    def _on_mousewheel_win(self, event):
-        self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        if platform.system() == "Darwin": self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_mac)
+        else: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_win)
+    def _unbind_mouse_scroll(self, event): self.canvas.unbind_all("<MouseWheel>")
+    def _on_mousewheel_mac(self, event): self.canvas.yview_scroll(int(-1 * event.delta), "units") if event.delta else None
+    def _on_mousewheel_win(self, event): self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
     def create_widgets(self, parent):
-        # 1. Data Loading
         ttk.Label(parent, text="1. Data Loading", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
-        
-        # Load Single
         ttk.Button(parent, text="Load Single TIF Data", command=self.load_data).pack(fill=tk.X, pady=2)
         self.file_label = ttk.Label(parent, text="No file loaded", wraplength=350)
         self.file_label.pack()
         
-        # ★ Batch Processing UI
-        batch_frame = ttk.LabelFrame(parent, text="Batch Processing")
-        batch_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(batch_frame, text="Select Directory & Start Batch", command=self.run_batch_processing).pack(fill=tk.X, pady=2)
+        # Batch Button
+        batch_frame = ttk.LabelFrame(parent, text="Batch Processing"); batch_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(batch_frame, text="Open Batch Config Window", command=self.open_batch_window).pack(fill=tk.X, pady=2)
         ttk.Label(batch_frame, textvariable=self.batch_info_var, foreground="red", font=("Arial", 10, "bold"), wraplength=350).pack(anchor="w")
         
-        f_info = ttk.LabelFrame(parent, text="Frame Viewer")
-        f_info.pack(fill=tk.X, pady=5)
+        f_info = ttk.LabelFrame(parent, text="Frame Viewer"); f_info.pack(fill=tk.X, pady=5)
         ttk.Label(f_info, textvariable=self.frame_info_var, foreground="blue").pack(anchor="w")
-        
         self.frame_slider = tk.Scale(f_info, from_=0, to=1, orient=tk.HORIZONTAL, label="Frame Index", command=self.on_slider_change)
-        self.frame_slider.pack(fill=tk.X, padx=5)
-        self.frame_slider.configure(state="disabled")
-        
+        self.frame_slider.pack(fill=tk.X, padx=5); self.frame_slider.configure(state="disabled")
         ttk.Button(f_info, text="Show Average Image", command=self.reset_to_average).pack(fill=tk.X, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 2. Scan Parameters
         ttk.Label(parent, text="2. Scan Parameters", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
-        scan_grp = ttk.LabelFrame(parent, text="Microscope Settings")
-        scan_grp.pack(fill=tk.X, pady=5)
-        
-        row_ps = ttk.Frame(scan_grp); row_ps.pack(fill=tk.X, pady=2)
-        ttk.Label(row_ps, text="Pixel Size:").pack(side=tk.LEFT)
-        ttk.Entry(row_ps, textvariable=self.pixel_size_var, width=8).pack(side=tk.LEFT, padx=5)
-        ttk.Label(row_ps, text="nm").pack(side=tk.LEFT)
-        
-        row_pd = ttk.Frame(scan_grp); row_pd.pack(fill=tk.X, pady=2)
-        ttk.Label(row_pd, text="Pixel Dwell:").pack(side=tk.LEFT)
-        ttk.Entry(row_pd, textvariable=self.pixel_dwell_var, width=8).pack(side=tk.LEFT, padx=5)
-        ttk.Label(row_pd, text="us").pack(side=tk.LEFT)
-        
-        row_lt = ttk.Frame(scan_grp); row_lt.pack(fill=tk.X, pady=2)
-        ttk.Label(row_lt, text="Line Time:").pack(side=tk.LEFT)
-        ttk.Entry(row_lt, textvariable=self.line_time_var, width=8).pack(side=tk.LEFT, padx=5)
-        ttk.Label(row_lt, text="ms").pack(side=tk.LEFT)
+        scan_grp = ttk.LabelFrame(parent, text="Microscope Settings"); scan_grp.pack(fill=tk.X, pady=5)
+        self._add_entry(scan_grp, "Pixel Size (nm):", self.pixel_size_var)
+        self._add_entry(scan_grp, "Pixel Dwell (us):", self.pixel_dwell_var)
+        self._add_entry(scan_grp, "Line Time (ms):", self.line_time_var)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 3. ROI & Preprocessing
         ttk.Label(parent, text="3. ROI & Preprocessing", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
-        
         bg_frame = ttk.Frame(parent); bg_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(bg_frame, text="Mov.Avg:").pack(side=tk.LEFT)
-        ttk.Entry(bg_frame, textvariable=self.ma_window_var, width=5).pack(side=tk.LEFT, padx=5)
-
-        roi_grp = ttk.LabelFrame(parent, text="ROI Config")
-        roi_grp.pack(fill=tk.X, pady=5)
+        ttk.Label(bg_frame, text="Mov.Avg:").pack(side=tk.LEFT); ttk.Entry(bg_frame, textvariable=self.ma_window_var, width=5).pack(side=tk.LEFT)
+        roi_grp = ttk.LabelFrame(parent, text="ROI Config"); roi_grp.pack(fill=tk.X, pady=5)
         ttk.Button(roi_grp, text="Select Full Image", command=self.set_full_roi).pack(fill=tk.X, pady=2)
-        f_sz = ttk.Frame(roi_grp); f_sz.pack(fill=tk.X, pady=2)
-        ttk.Label(f_sz, text="Size W:").pack(side=tk.LEFT); ttk.Entry(f_sz, textvariable=self.roi_w_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(f_sz, text=" H:").pack(side=tk.LEFT); ttk.Entry(f_sz, textvariable=self.roi_h_var, width=5).pack(side=tk.LEFT)
-        f_pos = ttk.Frame(roi_grp); f_pos.pack(fill=tk.X, pady=2)
-        ttk.Label(f_pos, text="Center X:").pack(side=tk.LEFT); ttk.Entry(f_pos, textvariable=self.roi_cx_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(f_pos, text=" Y:").pack(side=tk.LEFT); ttk.Entry(f_pos, textvariable=self.roi_cy_var, width=5).pack(side=tk.LEFT)
+        self._add_roi_entry(roi_grp, "Size W:", self.roi_w_var, " H:", self.roi_h_var)
+        self._add_roi_entry(roi_grp, "Center X:", self.roi_cx_var, " Y:", self.roi_cy_var)
         ttk.Button(parent, text="Update Image & ACF", command=self.update_processing_and_acf).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 4. Range & Omit
         ttk.Label(parent, text="4. Range & Omit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         omit_frame = ttk.Frame(parent); omit_frame.pack(fill=tk.X, pady=2)
         ttk.Label(omit_frame, text="Omit Radius:", foreground="red").pack(side=tk.LEFT)
         ttk.Entry(omit_frame, textvariable=self.omit_radius_var, width=5).pack(side=tk.LEFT, padx=5)
-        ttk.Label(omit_frame, text="px").pack(side=tk.LEFT)
-
-        range_frame = ttk.LabelFrame(parent, text="Fitting Range")
-        range_frame.pack(fill=tk.X, pady=5)
-        ttk.Checkbutton(range_frame, text="Auto-Detect Fit Range (Monotonic)", variable=self.auto_range_var).pack(anchor="w", padx=5, pady=2)
-        fr_x = ttk.Frame(range_frame); fr_x.pack(fill=tk.X)
-        ttk.Label(fr_x, text="Manual X (+/-):").pack(side=tk.LEFT); self.fit_range_x_var.trace_add("write", lambda *args: self.update_lines_from_entry())
-        ttk.Entry(fr_x, textvariable=self.fit_range_x_var, width=5).pack(side=tk.LEFT, padx=5)
-        fr_y = ttk.Frame(range_frame); fr_y.pack(fill=tk.X)
-        ttk.Label(fr_y, text="Manual Y (+/-):").pack(side=tk.LEFT); self.fit_range_y_var.trace_add("write", lambda *args: self.update_lines_from_entry())
-        ttk.Entry(fr_y, textvariable=self.fit_range_y_var, width=5).pack(side=tk.LEFT, padx=5)
+        range_frame = ttk.LabelFrame(parent, text="Fitting Range"); range_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(range_frame, text="Auto-Detect", variable=self.auto_range_var).pack(anchor="w")
+        self._add_entry(range_frame, "Range X:", self.fit_range_x_var)
+        self._add_entry(range_frame, "Range Y:", self.fit_range_y_var)
+        self.fit_range_x_var.trace_add("write", lambda *args: self.update_lines_from_entry())
+        self.fit_range_y_var.trace_add("write", lambda *args: self.update_lines_from_entry())
         ttk.Button(parent, text="Refresh Plots", command=lambda: self.plot_results(None)).pack(fill=tk.X, pady=2)
 
-        # Parameters
-        self.params = {
-            "D":  {"label": "D (um²/s)",   "val": 10.0},
-            "G0": {"label": "G0 (Amp)",    "val": 0.01},
-            "w0": {"label": "w0 (um)",     "val": cfg.W0},
-            "wz": {"label": "wz (um)",     "val": cfg.WZ},
-        }
-        self.entries = {}
-        self.checkvars = {}
+        self.params = { "D": {"val": 10.0, "label": "D (um²/s)"}, "G0": {"val": 0.01, "label": "G0"}, "w0": {"val": cfg.W0, "label": "w0"}, "wz": {"val": cfg.WZ, "label": "wz"} }
+        self.entries = {}; self.checkvars = {}
         for key, info in self.params.items():
             row = ttk.Frame(parent); row.pack(fill=tk.X, pady=2)
             ttk.Label(row, text=info["label"], width=12).pack(side=tk.LEFT)
             ev = tk.DoubleVar(value=info["val"]); ttk.Entry(row, textvariable=ev, width=8).pack(side=tk.LEFT, padx=5)
             self.entries[key] = ev
             cv = tk.BooleanVar(value=True if key in ["w0", "wz"] else False)
-            ttk.Checkbutton(row, text="Fix", variable=cv).pack(side=tk.LEFT)
-            self.checkvars[key] = cv
-
-        n_frame = ttk.Frame(parent); n_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(n_frame, text="Calc. N:", foreground="blue").pack(side=tk.LEFT)
-        ttk.Label(n_frame, textvariable=self.n_var, foreground="blue", font=("bold")).pack(side=tk.LEFT, padx=5)
+            ttk.Checkbutton(row, text="Fix", variable=cv).pack(side=tk.LEFT); self.checkvars[key] = cv
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 5. Fitting
-        ttk.Label(parent, text="5. Single Point Fitting", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
-        ttk.Button(parent, text="Run Fitting (Selected ROI)", command=self.run_fitting).pack(fill=tk.X, pady=5)
+        ttk.Label(parent, text="5. Single Fit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        ttk.Button(parent, text="Run Fitting", command=self.run_fitting).pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.result_text, relief="sunken", padding=5).pack(fill=tk.X)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 6. Output
         ttk.Label(parent, text="6. Output", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
-        ttk.Button(parent, text="Save Graphs as JPEG", command=self.save_graphs).pack(fill=tk.X, pady=5)
+        ttk.Button(parent, text="Save Graphs", command=self.save_graphs).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        # 7. Heatmap
-        ttk.Label(parent, text="7. Heatmap Analysis", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
+        ttk.Label(parent, text="7. Heatmap", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         hm_conf = ttk.Frame(parent); hm_conf.pack(fill=tk.X, pady=2)
-        ttk.Label(hm_conf, text="Win Size:").pack(side=tk.LEFT); ttk.Entry(hm_conf, textvariable=self.hm_window_var, width=5).pack(side=tk.LEFT, padx=5)
-        ttk.Label(hm_conf, text="Step (px):").pack(side=tk.LEFT); ttk.Entry(hm_conf, textvariable=self.hm_step_var, width=5).pack(side=tk.LEFT, padx=5)
-        
-        vis_grp = ttk.LabelFrame(parent, text="Display Settings")
-        vis_grp.pack(fill=tk.X, pady=5)
-        v_row1 = ttk.Frame(vis_grp); v_row1.pack(fill=tk.X, pady=2)
-        ttk.Checkbutton(v_row1, text="Scale by Percentile", variable=self.hm_autoscale_var).pack(side=tk.LEFT)
-        ttk.Entry(v_row1, textvariable=self.hm_percentile_var, width=5).pack(side=tk.LEFT, padx=5); ttk.Label(v_row1, text="%").pack(side=tk.LEFT)
-        v_row2 = ttk.Frame(vis_grp); v_row2.pack(fill=tk.X, pady=2)
-        ttk.Label(v_row2, text="or Manual Max D (um^2/s):").pack(side=tk.LEFT); ttk.Entry(v_row2, textvariable=self.hm_max_val_var, width=6).pack(side=tk.LEFT, padx=5)
-        v_row3 = ttk.Frame(vis_grp); v_row3.pack(fill=tk.X, pady=2)
-        ttk.Label(v_row3, text="Interpolation:").pack(side=tk.LEFT)
-        ttk.Combobox(v_row3, textvariable=self.hm_interp_var, values=["nearest", "bicubic", "bilinear"], width=10, state="readonly").pack(side=tk.LEFT, padx=5)
-        ttk.Button(vis_grp, text="Re-draw Map Only", command=self.plot_heatmap_result).pack(fill=tk.X, pady=2)
-
-        self.progress_bar = ttk.Progressbar(parent, variable=self.progress_val, maximum=100)
-        self.progress_bar.pack(fill=tk.X, pady=5)
+        ttk.Label(hm_conf, text="Win:").pack(side=tk.LEFT); ttk.Entry(hm_conf, textvariable=self.hm_window_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(hm_conf, text="Step:").pack(side=tk.LEFT); ttk.Entry(hm_conf, textvariable=self.hm_step_var, width=5).pack(side=tk.LEFT)
+        vis_grp = ttk.LabelFrame(parent, text="Display"); vis_grp.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(vis_grp, text="Auto Scale", variable=self.hm_autoscale_var).pack(side=tk.LEFT)
+        ttk.Entry(vis_grp, textvariable=self.hm_percentile_var, width=5).pack(side=tk.LEFT); ttk.Label(vis_grp, text="%").pack(side=tk.LEFT)
+        self.progress_bar = ttk.Progressbar(parent, variable=self.progress_val, maximum=100); self.progress_bar.pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.heatmap_status, font=("Arial", 9)).pack(anchor="w")
-
         hm_btns = ttk.Frame(parent); hm_btns.pack(fill=tk.X, pady=5)
-        ttk.Button(hm_btns, text="Generate Heatmap (Live Plot)", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(hm_btns, text="Stop", command=self.stop_heatmap).pack(side=tk.LEFT, padx=2)
-        ttk.Button(parent, text="Save Heatmap Image", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
+        ttk.Button(hm_btns, text="Gen Heatmap", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(hm_btns, text="Stop", command=self.stop_heatmap).pack(side=tk.LEFT)
+        ttk.Button(parent, text="Save Heatmap", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
+
+    def _add_entry(self, p, l, v):
+        f = ttk.Frame(p); f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=l, width=15).pack(side=tk.LEFT); ttk.Entry(f, textvariable=v, width=8).pack(side=tk.LEFT, padx=5)
+    def _add_roi_entry(self, p, l1, v1, l2, v2):
+        f = ttk.Frame(p); f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=l1).pack(side=tk.LEFT); ttk.Entry(f, textvariable=v1, width=5).pack(side=tk.LEFT)
+        ttk.Label(f, text=l2).pack(side=tk.LEFT); ttk.Entry(f, textvariable=v2, width=5).pack(side=tk.LEFT)
 
     def setup_plots(self):
-        self.fig = plt.Figure(figsize=(10, 8), dpi=100)
-        gs = self.fig.add_gridspec(2, 2)
-        self.ax_img = self.fig.add_subplot(gs[0, 0]) 
-        self.ax_3d  = self.fig.add_subplot(gs[0, 1], projection='3d')
-        self.ax_x   = self.fig.add_subplot(gs[1, 0])
-        self.ax_y   = self.fig.add_subplot(gs[1, 1])
+        self.fig = plt.Figure(figsize=(10, 8), dpi=100); gs = self.fig.add_gridspec(2, 2)
+        self.ax_img = self.fig.add_subplot(gs[0, 0]); self.ax_3d = self.fig.add_subplot(gs[0, 1], projection='3d')
+        self.ax_x = self.fig.add_subplot(gs[1, 0]); self.ax_y = self.fig.add_subplot(gs[1, 1])
         self.fig.tight_layout(pad=3.0)
-        self.canvas_fig = FigureCanvasTkAgg(self.fig, master=self.graph_frame)
-        self.canvas_fig.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas_fig = FigureCanvasTkAgg(self.fig, master=self.graph_frame); self.canvas_fig.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self.canvas_fig.mpl_connect('button_press_event', self.on_click)
         self.canvas_fig.mpl_connect('motion_notify_event', self.on_motion)
         self.canvas_fig.mpl_connect('button_release_event', self.on_release)
-        self.selector = RectangleSelector(
-            self.ax_img, self.on_select_roi, useblit=True, button=[1], 
-            minspanx=5, minspany=5, spancoords='pixels', interactive=True,
-            props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True)
-        )
+        self.selector = RectangleSelector(self.ax_img, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, spancoords='pixels', interactive=True, props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True))
         self.selector.set_active(False)
 
-    # ... (Mouse Events, omitted for brevity but preserved) ...
     def on_click(self, event):
         if event.inaxes in [self.ax_x, self.ax_y]:
             if self.drag_lines:
@@ -342,43 +450,31 @@ class RICSApp:
                     if event.inaxes == self.ax_x: active_lines = [('x_min', self.drag_lines.get('x_min')), ('x_max', self.drag_lines.get('x_max'))]
                     elif event.inaxes == self.ax_y: active_lines = [('y_min', self.drag_lines.get('y_min')), ('y_max', self.drag_lines.get('y_max'))]
                     for name, line in active_lines:
-                        if line is None: continue
-                        line_x = line.get_xdata()[0]
-                        dist = abs(click_x - line_x)
-                        if dist < min_dist: min_dist = dist; target = name
+                        if line:
+                            dist = abs(click_x - line.get_xdata()[0])
+                            if dist < min_dist: min_dist = dist; target = name
                     if min_dist < (self.fit_range_x_var.get() * 0.2 + 1.0): self.dragging_item = target
             return
-        if event.inaxes == self.ax_img and event.xdata is not None:
-            self.press_xy = (event.xdata, event.ydata)
+        if event.inaxes == self.ax_img and event.xdata: self.press_xy = (event.xdata, event.ydata)
 
     def on_motion(self, event):
-        if self.dragging_item is None: return
-        if event.xdata is None: return
-        new_x = int(round(event.xdata))
-        if 'x_' in self.dragging_item: self.fit_range_x_var.set(abs(new_x))
-        elif 'y_' in self.dragging_item: self.fit_range_y_var.set(abs(new_x))
+        if self.dragging_item and event.xdata:
+            new_x = int(round(event.xdata))
+            if 'x_' in self.dragging_item: self.fit_range_x_var.set(abs(new_x))
+            elif 'y_' in self.dragging_item: self.fit_range_y_var.set(abs(new_x))
 
     def on_release(self, event):
         if self.dragging_item: self.dragging_item = None; return
         if event.inaxes == self.ax_img and self.press_xy:
-            release_xy = (event.xdata, event.ydata)
-            if release_xy[0] is None: return
-            dist = math.sqrt((release_xy[0] - self.press_xy[0])**2 + (release_xy[1] - self.press_xy[1])**2)
-            self.press_xy = None
-            if dist < 5: 
-                new_cx = int(release_xy[0]); new_cy = int(release_xy[1])
-                self.roi_cx_var.set(new_cx); self.roi_cy_var.set(new_cy)
+            rx = (event.xdata, event.ydata)
+            if rx[0] and math.sqrt((rx[0]-self.press_xy[0])**2 + (rx[1]-self.press_xy[1])**2) < 5:
+                self.roi_cx_var.set(int(rx[0])); self.roi_cy_var.set(int(rx[1]))
                 self.update_processing_and_acf()
 
     def on_select_roi(self, eclick, erelease):
-        x1, y1 = int(eclick.xdata), int(eclick.ydata)
-        x2, y2 = int(erelease.xdata), int(erelease.ydata)
-        xmin, xmax = sorted([x1, x2]); ymin, ymax = sorted([y1, y2])
-        w = xmax - xmin; h = ymax - ymin
-        cx = xmin + w // 2; cy = ymin + h // 2
-        if w < 2 or h < 2: return
-        self.roi_w_var.set(w); self.roi_h_var.set(h)
-        self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
+        x1, y1 = int(eclick.xdata), int(eclick.ydata); x2, y2 = int(erelease.xdata), int(erelease.ydata)
+        w = abs(x2-x1); h = abs(y2-y1); cx = min(x1,x2)+w//2; cy = min(y1,y2)+h//2
+        self.roi_w_var.set(w); self.roi_h_var.set(h); self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
         self.update_processing_and_acf()
 
     def update_lines_from_entry(self):
@@ -392,322 +488,306 @@ class RICSApp:
             self.canvas_fig.draw_idle()
         except: pass
 
-    # =======================================================
-    # Helper & ROI
-    # =======================================================
-    def detect_monotonic_decay_range(self, data_1d, min_len=3):
-        n = len(data_1d)
-        if n < min_len + 2: return n
-        smooth = np.convolve(data_1d, np.ones(3)/3, mode='valid')
-        diff = np.diff(smooth)
-        idx = np.where(diff > 0)[0]
-        if len(idx) > 0: return idx[0] + 1
-        return n
-
     def set_full_roi(self):
-        if self.raw_stack is None: return
-        _, H, W = self.raw_stack.shape
-        self.roi_w_var.set(W); self.roi_h_var.set(H)
-        self.roi_cx_var.set(W // 2); self.roi_cy_var.set(H // 2)
-        self.update_processing_and_acf()
+        if self.raw_stack is not None:
+            _, H, W = self.raw_stack.shape
+            self.roi_w_var.set(W); self.roi_h_var.set(H); self.roi_cx_var.set(W//2); self.roi_cy_var.set(H//2)
+            self.update_processing_and_acf()
 
-    def on_slider_change(self, val):
-        self.current_frame_idx = int(val)
-        self.update_processing_and_acf()
-
-    def reset_to_average(self):
-        self.current_frame_idx = -1
-        self.update_processing_and_acf()
+    def on_slider_change(self, val): self.current_frame_idx = int(val); self.update_processing_and_acf()
+    def reset_to_average(self): self.current_frame_idx = -1; self.update_processing_and_acf()
+    def detect_monotonic_decay_range(self, data, min_len=3):
+        n=len(data); smooth=np.convolve(data,np.ones(3)/3,mode='valid'); diff=np.diff(smooth)
+        idx=np.where(diff>0)[0]; return idx[0]+1 if len(idx)>0 else n
 
     # =======================================================
-    # ★ Visual Batch Processing (Modified for v19.0)
+    # Batch & Core Logic
     # =======================================================
-    def run_batch_processing(self):
-        if self.is_batch_running:
-            # Stop if running
-            self.stop_heatmap()
-            self.is_batch_running = False
-            self.batch_info_var.set("Batch: Stopped by User")
-            return
-
+    def open_batch_window(self):
         root_dir = filedialog.askdirectory(title="Select Root Directory for Batch Analysis")
         if not root_dir: return
+        exts = ['*.tif', '*.tiff', '*.TIF', '*.TIFF']
+        files = []
+        for ext in exts: files.extend(glob.glob(os.path.join(root_dir, '**', ext), recursive=True))
+        files = sorted(list(set(files)))
+        if not files: messagebox.showinfo("Info", "No TIFF files found."); return
+        BatchConfigWindow(self.root, files, root_dir, self.start_visual_batch)
 
-        # Find all .tif/.tiff files recursively
-        extensions = ['*.tif', '*.tiff', '*.TIF', '*.TIFF']
-        target_files = []
-        for ext in extensions:
-            target_files.extend(glob.glob(os.path.join(root_dir, '**', ext), recursive=True))
-        
-        target_files = sorted(list(set(target_files)))
-        count = len(target_files)
-        
-        # Display count in console
-        print(f"\n{'='*50}")
-        print(f" Batch Processing Started")
-        print(f" Root Directory: {root_dir}")
-        print(f" Total TIFF files found: {count}")
-        print(f"{'='*50}\n")
-
-        if count == 0:
-            messagebox.showinfo("Info", "No TIFF files found in the directory.")
-            return
-
-        # Initialize Batch State
-        self.batch_files = target_files
-        self.batch_index = 0
-        self.is_batch_running = True
-        self.batch_stop_req = False
-        
-        # Start First File
+    def start_visual_batch(self, file_list, params):
+        self.batch_files = file_list; self.batch_params = params
+        self.batch_index = 0; self.is_batch_running = True; self.batch_stop_req = False
         self.process_batch_next()
 
     def process_batch_next(self):
         if not self.is_batch_running or self.batch_stop_req:
-            self.is_batch_running = False
-            self.batch_info_var.set("Batch: Stopped.")
+            self.is_batch_running = False; self.batch_info_var.set("Batch: Stopped.")
             return
-
         if self.batch_index >= len(self.batch_files):
-            self.is_batch_running = False
-            self.batch_info_var.set("Batch: Completed All Files.")
-            messagebox.showinfo("Done", "Batch processing finished.")
-            return
+            self.is_batch_running = False; self.batch_info_var.set("Batch: Finished All.")
+            messagebox.showinfo("Batch Done", "All files processed."); return
 
-        # 1. Load File
         fpath = self.batch_files[self.batch_index]
         fname = os.path.basename(fpath)
-        
-        self.batch_info_var.set(f"Batch: Processing {self.batch_index+1}/{len(self.batch_files)} - {fname}")
-        print(f"[{self.batch_index+1}/{len(self.batch_files)}] Loading: {fname}")
+        self.batch_info_var.set(f"Batch: {self.batch_index+1}/{len(self.batch_files)} - {fname}")
         
         try:
-            # Force load logic
-            self.file_label.config(text=fname)
-            self.raw_stack = prep.load_tiff(fpath)
+            self.load_file_internal(fpath)
+            # Apply Batch Params
+            p = self.batch_params
+            self.ma_window_var.set(p['mov_avg'])
+            self.pixel_size_var.set(p['scan_params']['pixel_size']*1e3)
+            self.pixel_dwell_var.set(p['scan_params']['pixel_dwell']*1e6)
+            self.line_time_var.set(p['scan_params']['line_time']*1e3)
+            
+            # Apply ROI from batch (Handle out of bounds)
+            _, H, W = self.raw_stack.shape
+            rx, ry, rw, rh = p['roi']
+            if rx+rw <= W and ry+rh <= H:
+                self.roi_w_var.set(rw); self.roi_h_var.set(rh)
+                self.roi_cx_var.set(rx + rw//2); self.roi_cy_var.set(ry + rh//2)
+            else: self.set_full_roi()
+            
+            self.update_processing_and_acf()
+            self.start_heatmap_thread_batch(p)
+        except Exception as e:
+            print(f"Skipping {fname}: {e}")
+            self.batch_index += 1; self.root.after(100, self.process_batch_next)
+
+    def start_heatmap_thread_batch(self, p):
+        self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Batch Analyzing...")
+        with self.live_fit_lock: self.live_fit_data = None
+        roi = self.roi_coords; win = p['heatmap']['win']; step = p['heatmap']['step']
+        self.heatmap_thread = threading.Thread(
+            target=self.run_heatmap_loop,
+            args=(self.processed_full, roi, win, step, 
+                  p['fit_params'], p['fixed_params'], 
+                  p['heatmap']['omit'], p['heatmap']['rx'], p['heatmap']['ry'], 
+                  p['heatmap']['auto_range'], p['scan_params'])
+        )
+        self.heatmap_thread.daemon = True; self.heatmap_thread.start()
+        self.root.after(100, self.monitor_heatmap_thread)
+
+    def save_batch_result(self):
+        if self.heatmap_d_map is None: return
+        p = self.batch_params['output']
+        save_path = os.path.splitext(self.current_file_path)[0] + "_heatmap.png"
+        try:
+            fig_temp = plt.figure(figsize=(6, 5))
+            ax_temp = fig_temp.add_subplot(111)
+            display_map = self.heatmap_d_map.copy()
+            valid = display_map[~np.isnan(display_map)]
+            vmin, vmax = None, None
+            if len(valid) > 0:
+                if p['auto']: vmin = np.nanmin(valid); vmax = np.nanpercentile(valid, p['perc'])
+                else: vmin = np.nanmin(valid); vmax = p['max']
+            im = ax_temp.imshow(display_map, cmap='jet', interpolation=p['interp'], vmin=vmin, vmax=vmax)
+            ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
+            fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
+            fig_temp.savefig(save_path, dpi=300); plt.close(fig_temp)
+            print(f"Saved: {save_path}")
+        except Exception as e: print(f"Save Error: {e}")
+
+    # =======================================================
+    # Main Logic
+    # =======================================================
+    def load_data(self):
+        filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif"), ("All files", "*.*")])
+        if not filepath: return
+        self.load_file_internal(filepath)
+
+    def load_file_internal(self, filepath):
+        try:
+            self.file_label.config(text=os.path.basename(filepath))
+            # ★ Robust loading logic inside gui_app.py
+            img = prep.load_tiff(filepath)
+            # Handle extra dimensions manually since we can't edit src/preprocessing.py easily
+            img = np.squeeze(img)
+            if img.ndim == 2: img = img[np.newaxis, :, :]
+            elif img.ndim >= 4:
+                while img.ndim > 3: img = img[:, 0, ...]
+            self.raw_stack = img
+            
             self.total_frames, H, W = self.raw_stack.shape
             self.frame_info_var.set(f"Total Frames: {self.total_frames} ({W}x{H})")
             self.frame_slider.configure(state="normal", to=self.total_frames-1)
             self.current_frame_idx = -1
-            self.current_file_path = fpath # Store for saving
-            
-            # Reset ROI to full image for consistency in batch? 
-            # Or keep GUI settings? Let's use current GUI ROI settings but make sure they are valid.
-            # If image size changes, we should probably reset center to new center.
-            self.roi_cx_var.set(W // 2)
-            self.roi_cy_var.set(H // 2)
-            # Ensure ROI size is valid
-            rw, rh = self.roi_w_var.get(), self.roi_h_var.get()
-            if rw > W: self.roi_w_var.set(W)
-            if rh > H: self.roi_h_var.set(H)
-            
+            self.current_file_path = filepath
+            if not self.is_batch_running:
+                self.roi_cx_var.set(W // 2); self.roi_cy_var.set(H // 2)
             self.selector.set_active(True)
-            self.update_processing_and_acf() # Update preview
-            
-            # 2. Start Heatmap (Visual)
-            # Use root.after to let GUI refresh before heavy calculation starts
-            self.root.after(200, self.start_heatmap_thread_internal)
-            
-        except Exception as e:
-            print(f"Error processing {fname}: {e}")
-            self.batch_index += 1
-            self.root.after(100, self.process_batch_next)
+            self.update_processing_and_acf()
+        except Exception as e: messagebox.showerror("Error", str(e))
 
-    def save_batch_result(self):
-        """Save heatmap without asking filename"""
-        if self.heatmap_d_map is None or self.current_file_path is None: return
-        
-        save_path = os.path.splitext(self.current_file_path)[0] + "_heatmap.png"
+    def update_processing_and_acf(self):
+        if self.raw_stack is None: return
         try:
-            # Use Agg backend for saving to avoid interference, or reuse logic
-            # Reuse logic from save_heatmap_image but with path
-            fig_temp = plt.figure(figsize=(6, 5))
-            ax_temp = fig_temp.add_subplot(111)
-            display_map = self.heatmap_d_map.copy()
-            vmin, vmax = None, None
-            valid_mask = ~np.isnan(display_map)
-            
-            if self.hm_autoscale_var.get():
-                if np.any(valid_mask):
-                    valid = display_map[valid_mask]
-                    vmin = np.nanmin(valid)
-                    try: perc = self.hm_percentile_var.get()
-                    except: perc = 95.0
-                    vmax = np.nanpercentile(valid, perc)
-            else:
-                if np.any(valid_mask):
-                    valid = display_map[valid_mask]
-                    vmin = np.nanmin(valid)
-                    vmax = self.hm_max_val_var.get()
-            
-            if vmin is not None and vmax is not None:
-                if vmin > vmax: vmin, vmax = vmax, vmin
-                if vmin == vmax: vmax = vmin + 1e-9
+            win = max(1, self.ma_window_var.get())
+            self.processed_full = prep.subtract_moving_average(self.raw_stack, win)
+            roi_w = self.roi_w_var.get(); roi_h = self.roi_h_var.get()
+            cx = self.roi_cx_var.get(); cy = self.roi_cy_var.get()
+            _, H, W = self.processed_full.shape
+            x_start = max(0, cx - roi_w // 2); x_end = min(W, cx + roi_w // 2)
+            y_start = max(0, cy - roi_h // 2); y_end = min(H, cy + roi_h // 2)
+            if (x_end-x_start)<2 or (y_end-y_start)<2: return
+            self.roi_data = self.processed_full[:, y_start:y_end, x_start:x_end]
+            self.roi_coords = (x_start, y_start, x_end - x_start, y_end - y_start)
+            self.acf_data = calc.calculate_2d_acf(self.roi_data)
+            self.plot_results(fit_data=None)
+            g0 = self.entries["G0"].get()
+            self.n_var.set(f"{1/g0:.2f}" if g0 > 0 else "Inf")
+            self.result_text.set("ACF Updated.")
+        except Exception as e: messagebox.showerror("Processing Error", str(e))
 
-            interp = self.hm_interp_var.get()
-            im = ax_temp.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
-            ax_temp.set_title(f"Diffusion Map: {os.path.basename(self.current_file_path)}")
-            fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
-            
-            fig_temp.savefig(save_path, dpi=300)
-            plt.close(fig_temp)
-            print(f"   -> Saved: {os.path.basename(save_path)}")
-            
-        except Exception as e:
-            print(f"   -> Save Error: {e}")
+    def run_fitting(self):
+        if self.acf_data is None: return
+        vals = {k: v.get() for k, v in self.entries.items()}
+        fixed = {k: v.get() for k, v in self.checkvars.items()}
+        frees = [k for k, v in fixed.items() if not v]
+        p0 = [vals[k] for k in frees]
+        H, W = self.acf_data.shape
+        cy, cx = H // 2, W // 2
+        if self.auto_range_var.get():
+            x_profile = self.acf_data[cy, cx:]; rx_new = self.detect_monotonic_decay_range(x_profile)
+            y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
+            self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
+        X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
+        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel())); ydata_flat = self.acf_data.ravel()
+        omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
+        mask_omit = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
+        mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
+        mask_valid = ~(mask_omit | mask_range)
+        x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
+        if len(y_fit) == 0: return
+        scan_params = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
+        def fit_wrapper(xy, *args):
+            p = vals.copy()
+            for i, name in enumerate(frees): p[name] = args[i]
+            return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"], **scan_params).ravel()
+        try:
+            if frees:
+                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)))
+                for i, name in enumerate(frees): self.entries[name].set(round(popt[i], 5))
+                final_p = vals.copy()
+                for i, name in enumerate(frees): final_p[name] = popt[i]
+            else: final_p = vals
+            fit_map = model.rics_3d_equation(xdata_flat, **final_p, **scan_params).reshape(H, W)
+            self.plot_results(fit_map)
+            g0 = final_p["G0"]
+            self.n_var.set(f"{1/g0:.2f}" if g0 > 1e-9 else "Inf")
+            self.result_text.set(f"Fitting Done. ({np.sum(mask_valid)} pts)")
+        except Exception as e: messagebox.showerror("Fitting Error", str(e))
 
-    # =======================================================
-    # Original Logic
-    # =======================================================
     def start_heatmap_thread(self):
-        # GUI button calls this. If batch is running, this might interrupt or confuse.
-        if self.is_batch_running:
-            return 
-        self.start_heatmap_thread_internal()
-
-    def start_heatmap_thread_internal(self):
-        if self.processed_full is None: 
-            if not self.is_batch_running: messagebox.showwarning("Warning", "Please load data first.")
-            return
-        if self.heatmap_thread is not None and self.heatmap_thread.is_alive(): return 
-
-        win_size = self.hm_window_var.get(); step = self.hm_step_var.get(); step = max(1, step)
-        roi_coords = self.roi_coords
-        
-        if platform.system() == "Darwin":
-            try: self.caffeinate_process = subprocess.Popen(['caffeinate', '-i'])
-            except: pass
-
-        self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Initializing...")
+        if self.is_batch_running: return
+        if self.processed_full is None: messagebox.showwarning("Warning", "Please load data first."); return
+        fp = {k: v.get() for k, v in self.entries.items()}
+        fx = {k: v.get() for k, v in self.checkvars.items()}
+        sp = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
+        self.stop_event.clear(); self.progress_val.set(0)
         with self.live_fit_lock: self.live_fit_data = None
-        
-        fit_params = {k: v.get() for k, v in self.entries.items()}
-        fixed_params = {k: v.get() for k, v in self.checkvars.items()}
-        omit_r = self.omit_radius_var.get()
-        range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        auto_range = self.auto_range_var.get()
-        
-        scan_params = {
-            'pixel_size': self.pixel_size_var.get() * 1e-3,
-            'pixel_dwell': self.pixel_dwell_var.get() * 1e-6,
-            'line_time': self.line_time_var.get() * 1e-3,
-        }
-
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
-            args=(self.processed_full, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range, scan_params)
+            args=(self.processed_full, self.roi_coords, self.hm_window_var.get(), self.hm_step_var.get(),
+                  fp, fx, self.omit_radius_var.get(), self.fit_range_x_var.get(), self.fit_range_y_var.get(),
+                  self.auto_range_var.get(), sp)
         )
-        self.heatmap_thread.daemon = True
-        self.heatmap_thread.start()
+        self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi_coords, win_size, step, fit_params, fixed_params, omit_r, range_x, range_y, auto_range, scan_params):
+    def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p):
         T, H, W = data.shape
-        half_w = win_size // 2
         d_map = np.full((H, W), np.nan)
-        roi_x, roi_y, roi_w, roi_h = roi_coords
-        start_y, end_y = roi_y, roi_y + roi_h
-        start_x, end_x = roi_x, roi_x + roi_w
-        frees = [k for k, v in fixed_params.items() if not v]
-        p0 = [fit_params[k] for k in frees]
-        
-        for y in range(start_y, end_y, step):
+        roi_x, roi_y, roi_w, roi_h = roi
+        frees = [k for k, v in fixed_p.items() if not v]
+        p0 = [fit_p[k] for k in frees]
+        for y in range(roi_y, roi_y+roi_h, step):
             if self.stop_event.is_set(): break
-            prog = ((y - start_y) / (end_y - start_y)) * 100
+            prog = ((y - roi_y) / roi_h) * 100
             self.progress_val.set(prog)
-            self.heatmap_status.set(f"Processing Row {y}/{end_y} (ROI)")
-
-            for x in range(start_x, end_x, step):
-                y1 = max(0, y - half_w); y2 = min(H, y + half_w)
-                x1 = max(0, x - half_w); x2 = min(W, x + half_w)
-                if (y2 - y1) < 4 or (x2 - x1) < 4: continue
-                roi_img = data[:, y1:y2, x1:x2]
-                try: acf = calc.calculate_2d_acf(roi_img)
-                except: continue
-                sub_h, sub_w = acf.shape; sub_cy, sub_cx = sub_h // 2, sub_w // 2
-                sx_axis = np.arange(-sub_cx, sub_cx + (1 if sub_w % 2 else 0))[:sub_w]
-                sy_axis = np.arange(-sub_cy, sub_cy + (1 if sub_h % 2 else 0))[:sub_h]
-                SX, SY = np.meshgrid(sx_axis, sy_axis)
-                xdata = np.vstack((SX.ravel(), SY.ravel())); ydata = acf.ravel()
-                dist_sq = SX.ravel()**2 + SY.ravel()**2
-                mask_omit = dist_sq <= (omit_r**2) if omit_r > 0 else np.zeros_like(dist_sq, dtype=bool)
-                curr_range_x = range_x; curr_range_y = range_y
-                if auto_range:
-                    x_profile = acf[sub_cy, sub_cx:]; rx_detected = self.detect_monotonic_decay_range(x_profile)
-                    y_profile = acf[sub_cy:, sub_cx]; ry_detected = self.detect_monotonic_decay_range(y_profile)
-                    curr_range_x = rx_detected; curr_range_y = ry_detected
-                mask_range = (np.abs(SX.ravel()) > curr_range_x) | (np.abs(SY.ravel()) > curr_range_y)
-                mask_valid = ~(mask_omit | mask_range)
-                x_fit = xdata[:, mask_valid]; y_fit = ydata[mask_valid]
-                if len(y_fit) < 5: continue
-                def local_wrapper(xy, *args):
-                    p = fit_params.copy()
-                    for i, name in enumerate(frees): p[name] = args[i]
-                    return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"], pixel_size=scan_params['pixel_size'], pixel_dwell=scan_params['pixel_dwell'], line_time=scan_params['line_time']).ravel()
+            for x in range(roi_x, roi_x+roi_w, step):
+                y1, y2 = max(0, y-win//2), min(H, y+win//2)
+                x1, x2 = max(0, x-win//2), min(W, x+win//2)
+                if (y2-y1)<4 or (x2-x1)<4: continue
                 try:
-                    popt = None
+                    acf = calc.calculate_2d_acf(data[:, y1:y2, x1:x2])
+                    sh, sw = acf.shape; scy, scx = sh//2, sw//2
+                    sx = np.arange(-scx, scx+(1 if sw%2 else 0))[:sw]
+                    sy = np.arange(-scy, scy+(1 if sh%2 else 0))[:sh]
+                    SX, SY = np.meshgrid(sx, sy)
+                    crx, cry = rx, ry
+                    if auto:
+                        crx = self.detect_monotonic_decay_range(acf[scy, scx:])
+                        cry = self.detect_monotonic_decay_range(acf[scy:, scx])
+                    mask_omit_arr = (SX**2 + SY**2 <= omit**2) if omit > 0 else np.zeros_like(SX, dtype=bool)
+                    mask_range = (np.abs(SX)>crx) | (np.abs(SY)>cry)
+                    mask = ~(mask_omit_arr | mask_range)
+                    xf = np.vstack((SX.ravel(), SY.ravel()))[:, mask.ravel()]
+                    yf = acf.ravel()[mask.ravel()]
+                    if len(yf) < 5: continue
+                    def wrap(xy, *a):
+                        curr = fit_p.copy()
+                        for i, n in enumerate(frees): curr[n] = a[i]
+                        return model.rics_3d_equation(xy, D=curr["D"], G0=curr["G0"], w0=curr["w0"], wz=curr["wz"], **scan_p).ravel()
                     if frees:
-                        popt, _ = curve_fit(local_wrapper, x_fit, y_fit, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)), maxfev=600)
-                        d_idx = frees.index("D") if "D" in frees else -1
-                        if d_idx >= 0: d_map[y:min(H, y+step), x:min(W, x+step)] = popt[d_idx]
-                        elif "D" in fit_params: d_map[y:min(H, y+step), x:min(W, x+step)] = fit_params["D"]
-                    else:
-                        if "D" in fit_params: d_map[y:min(H, y+step), x:min(W, x+step)] = fit_params["D"]
-                    final_p = fit_params.copy()
-                    if popt is not None:
-                        for i, name in enumerate(frees): final_p[name] = popt[i]
-                    x_slice_vals = acf[sub_cy, :]; y_slice_vals = acf[:, sub_cx]
-                    x_axis_points = np.vstack((sx_axis, np.zeros_like(sx_axis)))
-                    x_curve = model.rics_3d_equation(x_axis_points, **final_p, pixel_size=scan_params['pixel_size'], pixel_dwell=scan_params['pixel_dwell'], line_time=scan_params['line_time'])
-                    y_axis_points = np.vstack((np.zeros_like(sy_axis), sy_axis))
-                    y_curve = model.rics_3d_equation(y_axis_points, **final_p, pixel_size=scan_params['pixel_size'], pixel_dwell=scan_params['pixel_dwell'], line_time=scan_params['line_time'])
+                        popt, _ = curve_fit(wrap, xf, yf, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)), maxfev=600)
+                        if "D" in frees: d_map[y:min(H, y+step), x:min(W, x+step)] = popt[frees.index("D")]
+                    else: d_map[y:min(H, y+step), x:min(W, x+step)] = fit_p["D"]
+                    
                     with self.live_fit_lock:
+                        curr = fit_p.copy()
+                        if frees:
+                            for i, n in enumerate(frees): curr[n] = popt[i]
+                        xc = model.rics_3d_equation(np.vstack((sx, np.zeros_like(sx))), **curr, **scan_p)
+                        yc = model.rics_3d_equation(np.vstack((np.zeros_like(sy), sy)), **curr, **scan_p)
                         self.live_fit_data = {
-                            "sx_axis": sx_axis, "x_slice_vals": x_slice_vals, "x_curve": x_curve, "range_x": curr_range_x,
-                            "sy_axis": sy_axis, "y_slice_vals": y_slice_vals, "y_curve": y_curve, "range_y": curr_range_y, "omit_r": omit_r
+                            "sx_axis": sx, "x_slice_vals": acf[scy, :], "x_curve": xc, "range_x": crx,
+                            "sy_axis": sy, "y_slice_vals": acf[:, scx], "y_curve": yc, "range_y": cry
                         }
-                except: pass
+                except Exception: pass
         self.heatmap_d_map = d_map
 
     def monitor_heatmap_thread(self):
-        data_snapshot = None
-        with self.live_fit_lock:
-            if self.live_fit_data: data_snapshot = self.live_fit_data.copy(); self.live_fit_data = None 
-        if data_snapshot: self.update_live_plot(data_snapshot)
+        try:
+            with self.live_fit_lock:
+                if self.live_fit_data:
+                    self.update_live_plot(self.live_fit_data); self.live_fit_data = None
+        except Exception: pass
         if self.heatmap_thread.is_alive():
             self.root.after(100, self.monitor_heatmap_thread)
         else:
-            if self.caffeinate_process: self.caffeinate_process.terminate(); self.caffeinate_process = None
             self.progress_val.set(100)
-            status = "Stopped." if self.stop_event.is_set() else "Completed."
-            
-            # ★ Batch Logic on Completion
             if self.is_batch_running:
-                self.save_batch_result()
-                self.batch_index += 1
-                self.root.after(200, self.process_batch_next) # Slight delay for UI
+                self.save_batch_result(); self.batch_index += 1; self.root.after(200, self.process_batch_next)
             else:
-                self.heatmap_status.set(status)
-                self.plot_heatmap_result()
+                self.heatmap_status.set("Completed."); self.plot_heatmap_result()
 
     def update_live_plot(self, d):
-        self.ax_x.cla(); self.ax_y.cla()
-        self.ax_x.plot(d["sx_axis"], d["x_slice_vals"], 'b.', ms=4, alpha=0.5)
-        self.ax_x.plot(d["sx_axis"], d["x_curve"], 'r-', lw=2)
-        self.ax_x.axvline(-d["range_x"], color='orange', ls='--'); self.ax_x.axvline(d["range_x"], color='orange', ls='--')
-        self.ax_x.set_title("Live X Fit"); self.ax_x.grid(True)
-        self.ax_y.plot(d["sy_axis"], d["y_slice_vals"], 'b.', ms=4, alpha=0.5)
-        self.ax_y.plot(d["sy_axis"], d["y_curve"], 'r-', lw=2)
-        self.ax_y.axvline(-d["range_y"], color='orange', ls='--'); self.ax_y.axvline(d["range_y"], color='orange', ls='--')
-        self.ax_y.set_title("Live Y Fit"); self.ax_y.grid(True)
-        if self.fixed_ylim_x is not None: self.ax_x.set_ylim(self.fixed_ylim_x)
-        if self.fixed_ylim_y is not None: self.ax_y.set_ylim(self.fixed_ylim_y)
-        self.canvas_fig.draw()
+        try:
+            self.ax_x.cla(); self.ax_y.cla()
+            self.ax_x.plot(d["sx_axis"], d["x_slice_vals"], 'b.', ms=4, alpha=0.5); self.ax_x.plot(d["sx_axis"], d["x_curve"], 'r-')
+            self.ax_x.axvline(-d["range_x"], color='orange', ls='--'); self.ax_x.axvline(d["range_x"], color='orange', ls='--')
+            self.ax_x.set_title("Live X Fit")
+            self.ax_y.plot(d["sy_axis"], d["y_slice_vals"], 'b.', ms=4, alpha=0.5); self.ax_y.plot(d["sy_axis"], d["y_curve"], 'r-')
+            self.ax_y.axvline(-d["range_y"], color='orange', ls='--'); self.ax_y.axvline(d["range_y"], color='orange', ls='--')
+            self.ax_y.set_title("Live Y Fit")
+            
+            # Zoom logic for live plot
+            def apply_zoom(ax, axis, vals, limit):
+                ax.set_xlim(-limit*1.5, limit*1.5)
+                mask = np.abs(axis) <= (limit * 1.5)
+                if np.any(mask):
+                    v = vals[mask]
+                    if np.all(np.isfinite(v)):
+                        mn, mx = np.min(v), np.max(v)
+                        m = (mx-mn)*0.1 if mx!=mn else 0.01; ax.set_ylim(mn-m, mx+m)
+            apply_zoom(self.ax_x, d["sx_axis"], d["x_slice_vals"], d["range_x"])
+            apply_zoom(self.ax_y, d["sy_axis"], d["y_slice_vals"], d["range_y"])
+            self.canvas_fig.draw()
+        except Exception: pass
 
     def stop_heatmap(self): 
         self.stop_event.set()
-        if self.is_batch_running:
-            self.batch_stop_req = True
+        if self.is_batch_running: self.batch_stop_req = True
 
     def plot_heatmap_result(self):
         if self.heatmap_d_map is None: return
@@ -771,81 +851,6 @@ class RICSApp:
                 messagebox.showinfo("Success", f"Saved: {filepath}")
             except Exception as e: messagebox.showerror("Error", str(e))
 
-    def load_data(self):
-        filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif"), ("All files", "*.*")])
-        if not filepath: return
-        try:
-            self.file_label.config(text=os.path.basename(filepath))
-            self.raw_stack = prep.load_tiff(filepath)
-            self.total_frames, H, W = self.raw_stack.shape
-            self.frame_info_var.set(f"Total Frames: {self.total_frames} ({W}x{H})")
-            self.frame_slider.configure(state="normal", to=self.total_frames-1)
-            self.current_frame_idx = -1
-            self.roi_cx_var.set(W // 2); self.roi_cy_var.set(H // 2)
-            self.current_file_path = filepath
-            self.selector.set_active(True)
-            self.update_processing_and_acf()
-        except Exception as e: messagebox.showerror("Error", str(e))
-
-    def update_processing_and_acf(self):
-        if self.raw_stack is None: return
-        try:
-            win = max(1, self.ma_window_var.get())
-            self.processed_full = prep.subtract_moving_average(self.raw_stack, win)
-            roi_w = self.roi_w_var.get(); roi_h = self.roi_h_var.get()
-            cx = self.roi_cx_var.get(); cy = self.roi_cy_var.get()
-            _, H, W = self.processed_full.shape
-            x_start = max(0, cx - roi_w // 2); x_end = min(W, cx + roi_w // 2)
-            y_start = max(0, cy - roi_h // 2); y_end = min(H, cy + roi_h // 2)
-            if (x_end-x_start)<2 or (y_end-y_start)<2: return
-            self.roi_data = self.processed_full[:, y_start:y_end, x_start:x_end]
-            self.roi_coords = (x_start, y_start, x_end - x_start, y_end - y_start)
-            self.acf_data = calc.calculate_2d_acf(self.roi_data)
-            self.plot_results(fit_data=None)
-            g0 = self.entries["G0"].get()
-            self.n_var.set(f"{1/g0:.2f}" if g0 > 0 else "Inf")
-            self.result_text.set("ACF Updated.")
-        except Exception as e: messagebox.showerror("Processing Error", str(e))
-
-    def run_fitting(self):
-        if self.acf_data is None: return
-        vals = {k: v.get() for k, v in self.entries.items()}
-        fixed = {k: v.get() for k, v in self.checkvars.items()}
-        frees = [k for k, v in fixed.items() if not v]
-        p0 = [vals[k] for k in frees]
-        H, W = self.acf_data.shape
-        cy, cx = H // 2, W // 2
-        if self.auto_range_var.get():
-            x_profile = self.acf_data[cy, cx:]; rx_new = self.detect_monotonic_decay_range(x_profile)
-            y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
-            self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
-        X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
-        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel())); ydata_flat = self.acf_data.ravel()
-        omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        mask_omit = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
-        mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
-        mask_valid = ~(mask_omit | mask_range)
-        x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
-        if len(y_fit) == 0: return
-        scan_params = {'pixel_size': self.pixel_size_var.get() * 1e-3, 'pixel_dwell': self.pixel_dwell_var.get() * 1e-6, 'line_time': self.line_time_var.get() * 1e-3}
-        def fit_wrapper(xy, *args):
-            p = vals.copy()
-            for i, name in enumerate(frees): p[name] = args[i]
-            return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"], pixel_size=scan_params['pixel_size'], pixel_dwell=scan_params['pixel_dwell'], line_time=scan_params['line_time']).ravel()
-        try:
-            if frees:
-                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=([0]*len(frees), [np.inf]*len(frees)))
-                for i, name in enumerate(frees): self.entries[name].set(round(popt[i], 5))
-                final_p = vals.copy()
-                for i, name in enumerate(frees): final_p[name] = popt[i]
-            else: final_p = vals
-            fit_map = model.rics_3d_equation(xdata_flat, **final_p, pixel_size=scan_params['pixel_size'], pixel_dwell=scan_params['pixel_dwell'], line_time=scan_params['line_time']).reshape(H, W)
-            self.plot_results(fit_map)
-            g0 = final_p["G0"]
-            self.n_var.set(f"{1/g0:.2f}" if g0 > 1e-9 else "Inf")
-            self.result_text.set(f"Fitting Done. ({np.sum(mask_valid)} pts)")
-        except Exception as e: messagebox.showerror("Fitting Error", str(e))
-
     def save_graphs(self):
         if self.acf_data is None: return
         filepath = filedialog.asksaveasfilename(defaultextension=".jpg", filetypes=[("JPEG", "*.jpg"), ("All", "*.*")])
@@ -860,30 +865,38 @@ class RICSApp:
         if self.current_frame_idx == -1: display_img = np.mean(self.processed_full, axis=0); title = "Average Image"
         else: idx = min(max(0, self.current_frame_idx), self.total_frames-1); display_img = self.processed_full[idx]; title = f"Frame {idx}/{self.total_frames-1}"
         self.ax_img.imshow(display_img, cmap='gray')
-        self.ax_img.set_title(f"{title} (Drag/Click to Move ROI)")
+        self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
         x, y, w, h = self.roi_coords
         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
         self.ax_img.add_patch(rect)
         H, W = self.acf_data.shape; cy, cx = H // 2, W // 2
-        if self.auto_range_var.get():
-            x_profile = self.acf_data[cy, cx:]; rx_new = self.detect_monotonic_decay_range(x_profile)
-            y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
-            self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]; y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
-        omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
+        
+        omit_r = self.omit_radius_var.get()
+        range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
+        
         def plot_slice(ax, axis_vals, data_vals, fit_vals, title, fit_limit, line_prefix):
             dvals = np.abs(axis_vals)
-            mask_active = (dvals <= fit_limit) & ~((dvals <= omit_r) if omit_r > 0 else False)
+            # Fix mask logic deprecation and zoom
+            mask_omit_arr = (dvals <= omit_r) if omit_r > 0 else np.zeros_like(dvals, dtype=bool)
+            mask_active = (dvals <= fit_limit) & (~mask_omit_arr)
+            
             ax.plot(axis_vals, data_vals, 'b-', alpha=0.2)
             ax.plot(axis_vals[mask_active], data_vals[mask_active], 'bo', markersize=4)
             if fit_vals is not None: ax.plot(axis_vals, fit_vals, 'r-', linewidth=2)
-            if np.any(mask_active): v = data_vals[mask_active]; mn, mx = np.min(v), np.max(v); m = (mx-mn)*0.1 if mx!=mn else 0.01; ax.set_ylim(mn-m, mx+m)
+            
+            # Zoom logic
+            ax.set_xlim(-fit_limit*1.5, fit_limit*1.5)
+            if np.any(mask_active): 
+                v = data_vals[mask_active]; mn, mx = np.min(v), np.max(v)
+                m = (mx-mn)*0.1 if mx!=mn else 0.01; ax.set_ylim(mn-m, mx+m)
             else: ax.autoscale(True, axis='y')
             self.drag_lines[f'{line_prefix}_min'] = ax.axvline(-fit_limit, color='r', linestyle='--', picker=5)
             self.drag_lines[f'{line_prefix}_max'] = ax.axvline(fit_limit, color='r', linestyle='--', picker=5)
             ax.set_title(title); ax.grid(True)
+
         plot_slice(self.ax_x, x_axis, self.acf_data[cy, :], fit_data[cy, :] if fit_data is not None else None, "Fast Scan (X)", range_x, "x")
         plot_slice(self.ax_y, y_axis, self.acf_data[:, cx], fit_data[:, cx] if fit_data is not None else None, "Slow Scan (Y)", range_y, "y")
         self.ax_3d.plot_surface(X_grid, Y_grid, self.acf_data, cmap='viridis', alpha=0.8)
