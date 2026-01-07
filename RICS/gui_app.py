@@ -4,30 +4,50 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.widgets import RectangleSelector
+from matplotlib.widgets import RectangleSelector, PolygonSelector
+from matplotlib.path import Path
 from scipy.optimize import curve_fit
 import os
-import platform
 import threading
 import math
-import subprocess # For caffeinate
-import glob # For batch processing
+import glob
+import platform
+import subprocess
 
-# ★ Mac App Nap対策
-try:
-    import appnope
-    appnope.nope()
-except ImportError:
-    pass
-
-# 自作モジュールのインポート
+# 自作モジュールのインポート (計算ロジックのみ src から)
 import config as cfg
 from src import preprocessing as prep
 from src import calculation as calc
 from src import model
 
 # =============================================================================
-# ★ Batch Configuration Window Class (Inside gui_app.py)
+# ★ Mac Utilities
+# =============================================================================
+def disable_app_nap():
+    """App Nap (省電力機能) を無効化"""
+    try:
+        import appnope
+        appnope.nope()
+    except ImportError:
+        pass
+
+def setup_dock_icon(root):
+    """最小化したアプリをDockクリックで戻せるようにする"""
+    if platform.system() == "Darwin":
+        try:
+            def on_dock_click(*args):
+                root.deiconify()
+                root.lift()
+            root.createcommand("::tk::mac::ReopenApplication", on_dock_click)
+        except Exception:
+            pass
+
+# 初期化時に実行
+disable_app_nap()
+
+
+# =============================================================================
+# ★ Batch Configuration Window Class
 # =============================================================================
 class BatchConfigWindow(tk.Toplevel):
     def __init__(self, master, file_list, root_dir, execute_callback):
@@ -38,11 +58,10 @@ class BatchConfigWindow(tk.Toplevel):
         self.root_dir = root_dir
         self.execute_callback = execute_callback
         
-        # State variables
         self.current_preview_data = None
-        self.roi_coords = (0, 0, 0, 0) # x, y, w, h
+        self.roi_coords = (0, 0, 0, 0)
         
-        # UI Variables (Default from config/app defaults)
+        # UI Variables
         self.ma_win = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
         self.px_size = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0)
         self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
@@ -69,13 +88,11 @@ class BatchConfigWindow(tk.Toplevel):
 
         self._create_layout()
         
-        # Select first file by default
         if self.file_list:
             self.file_lb.selection_set(0)
             self._on_file_select(None)
 
     def _create_layout(self):
-        # --- Left: File List ---
         left_frame = ttk.Frame(self, width=300, padding=5)
         left_frame.pack(side=tk.LEFT, fill=tk.Y)
         ttk.Label(left_frame, text="Files Found (Relative Path):", font=("bold")).pack(anchor="w")
@@ -91,15 +108,12 @@ class BatchConfigWindow(tk.Toplevel):
         sb_x.config(command=self.file_lb.xview)
         
         for f in self.file_list:
-            try:
-                rel_path = os.path.relpath(f, self.root_dir)
-            except ValueError:
-                rel_path = os.path.basename(f)
+            try: rel_path = os.path.relpath(f, self.root_dir)
+            except ValueError: rel_path = os.path.basename(f)
             self.file_lb.insert(tk.END, rel_path)
             
         self.file_lb.bind('<<ListboxSelect>>', self._on_file_select)
 
-        # --- Center: Preview & ROI ---
         center_frame = ttk.Frame(self, padding=5)
         center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ttk.Label(center_frame, text="Preview & ROI Selection (Applied to ALL)", font=("bold")).pack(anchor="w")
@@ -109,17 +123,11 @@ class BatchConfigWindow(tk.Toplevel):
         self.canvas = FigureCanvasTkAgg(self.fig, master=center_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
-        self.selector = RectangleSelector(
-            self.ax, self._on_select_roi, useblit=True, button=[1], 
-            minspanx=5, minspany=5, spancoords='pixels', interactive=True,
-            props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True)
-        )
+        self.selector = RectangleSelector(self.ax, self._on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, spancoords='pixels', interactive=True, props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True))
 
-        # --- Right: Parameters ---
         right_frame = ttk.Frame(self, width=300, padding=10)
         right_frame.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # Params Group
         p_grp = ttk.LabelFrame(right_frame, text="1. Pre-process & Scan")
         p_grp.pack(fill=tk.X, pady=5)
         self._add_entry(p_grp, "Mov.Avg:", self.ma_win)
@@ -127,7 +135,6 @@ class BatchConfigWindow(tk.Toplevel):
         self._add_entry(p_grp, "Pixel Dwell (us):", self.px_dwell)
         self._add_entry(p_grp, "Line Time (ms):", self.line_time)
         
-        # Fit Group
         f_grp = ttk.LabelFrame(right_frame, text="2. Fitting Initials")
         f_grp.pack(fill=tk.X, pady=5)
         self._add_entry(f_grp, "D (um2/s):", self.fit_D)
@@ -135,7 +142,6 @@ class BatchConfigWindow(tk.Toplevel):
         self._add_entry(f_grp, "w0 (um):", self.fit_w0, self.fix_w0)
         self._add_entry(f_grp, "wz (um):", self.fit_wz, self.fix_wz)
         
-        # Heatmap Group
         h_grp = ttk.LabelFrame(right_frame, text="3. Heatmap Settings")
         h_grp.pack(fill=tk.X, pady=5)
         self._add_entry(h_grp, "Win Size:", self.hm_win)
@@ -145,7 +151,6 @@ class BatchConfigWindow(tk.Toplevel):
         self._add_entry(h_grp, "Range Y (px):", self.range_y)
         ttk.Checkbutton(h_grp, text="Auto-Detect Range", variable=self.auto_range).pack(anchor="w")
         
-        # Output Group
         o_grp = ttk.LabelFrame(right_frame, text="4. Output Settings")
         o_grp.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(o_grp, text="Auto Scale (%)", variable=self.hm_autoscale).pack(anchor="w")
@@ -154,16 +159,13 @@ class BatchConfigWindow(tk.Toplevel):
         ttk.Label(o_grp, text="Interpolation:").pack(anchor="w")
         ttk.Combobox(o_grp, textvariable=self.hm_interp, values=["nearest", "bicubic", "bilinear"]).pack(fill=tk.X)
 
-        # Run Button
         ttk.Button(right_frame, text="START BATCH ANALYSIS", command=self._on_run).pack(fill=tk.X, pady=20)
 
     def _add_entry(self, parent, label, var, check_var=None):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=1)
+        f = ttk.Frame(parent); f.pack(fill=tk.X, pady=1)
         ttk.Label(f, text=label, width=15).pack(side=tk.LEFT)
         ttk.Entry(f, textvariable=var, width=8).pack(side=tk.LEFT)
-        if check_var:
-            ttk.Checkbutton(f, text="Fix", variable=check_var).pack(side=tk.LEFT, padx=5)
+        if check_var: ttk.Checkbutton(f, text="Fix", variable=check_var).pack(side=tk.LEFT, padx=5)
 
     def _on_file_select(self, event):
         idx = self.file_lb.curselection()
@@ -171,25 +173,20 @@ class BatchConfigWindow(tk.Toplevel):
         fpath = self.file_list[idx[0]]
         
         try:
-            # ★ Robust loading for preview to avoid "too many values to unpack"
             raw = prep.load_tiff(fpath)
-            
-            # 次元削減処理 (4D -> 3D -> 2D)
-            if raw.ndim >= 4:
-                raw = raw[:, 0, ...] # 最初のチャンネルを取得
+            # Ensure 3D -> 2D preview
+            if raw.ndim >= 4: raw = raw[:, 0, ...] 
             
             if raw.ndim == 3:
-                # (T, H, W) -> 時間平均 (H, W)
                 self.current_preview_data = np.mean(raw, axis=0)
             elif raw.ndim == 2:
-                # (H, W) -> そのまま
                 self.current_preview_data = raw
             else:
-                raise ValueError(f"Unexpected dimension: {raw.ndim}")
+                self.current_preview_data = raw[0]
 
             H, W = self.current_preview_data.shape
             if self.roi_coords == (0, 0, 0, 0):
-                self.roi_coords = (0, 0, W, H) # Default Full
+                self.roi_coords = (0, 0, W, H)
                 
             self._redraw_preview()
         except Exception as e:
@@ -208,74 +205,191 @@ class BatchConfigWindow(tk.Toplevel):
         self.ax.cla()
         self.ax.imshow(self.current_preview_data, cmap='gray')
         self.ax.set_title("Draw ROI (Applied to ALL files)")
-        
         x, y, w, h = self.roi_coords
         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
         self.ax.add_patch(rect)
         self.canvas.draw()
 
     def _on_run(self):
-        # Gather all parameters into a dictionary
         params = {
             'mov_avg': self.ma_win.get(),
-            'scan_params': {
-                'pixel_size': self.px_size.get() * 1e-3,
-                'pixel_dwell': self.px_dwell.get() * 1e-6,
-                'line_time': self.line_time.get() * 1e-3,
-            },
-            'fit_params': {
-                "D": self.fit_D.get(), "G0": self.fit_G0.get(),
-                "w0": self.fit_w0.get(), "wz": self.fit_wz.get()
-            },
-            'fixed_params': {
-                "w0": self.fix_w0.get(), "wz": self.fix_wz.get(),
-                "D": False, "G0": False
-            },
-            'heatmap': {
-                'win': self.hm_win.get(), 'step': self.hm_step.get(),
-                'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
-                'auto_range': self.auto_range.get()
-            },
+            'scan_params': {'pixel_size': self.px_size.get() * 1e-3, 'pixel_dwell': self.px_dwell.get() * 1e-6, 'line_time': self.line_time.get() * 1e-3},
+            'fit_params': {"D": self.fit_D.get(), "G0": self.fit_G0.get(), "w0": self.fit_w0.get(), "wz": self.fit_wz.get()},
+            'fixed_params': {"w0": self.fix_w0.get(), "wz": self.fix_wz.get(), "D": False, "G0": False},
+            'heatmap': {'win': self.hm_win.get(), 'step': self.hm_step.get(), 'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(), 'auto_range': self.auto_range.get()},
             'roi': self.roi_coords,
-            'output': {
-                'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(),
-                'max': self.hm_max.get(), 'interp': self.hm_interp.get()
-            }
+            'output': {'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(), 'max': self.hm_max.get(), 'interp': self.hm_interp.get()}
         }
-        
         self.execute_callback(self.file_list, params)
         self.destroy()
 
 
 # =============================================================================
-# ★ Main Application
+# ★ ROI Analysis Window Class
+# =============================================================================
+class ROIAnalysisWindow(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Freehand ROI Analysis Tool")
+        self.geometry("1000x800")
+        
+        self.ref_image = None
+        self.diff_map = None
+        self.poly_selector = None
+        self.roi_verts = None
+        
+        self._create_layout()
+
+    def _create_layout(self):
+        ctrl_frame = ttk.Frame(self, padding=10)
+        ctrl_frame.pack(side=tk.TOP, fill=tk.X)
+        
+        ttk.Label(ctrl_frame, text="Step 1: Load Files", font=("bold")).pack(anchor="w")
+        btn_frame = ttk.Frame(ctrl_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_frame, text="1. Load Reference Image (Tiff/Png)", command=self.load_ref_image).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="2. Load Diffusion Data (.csv)", command=self.load_diff_data).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+        
+        ttk.Label(ctrl_frame, text="Step 2: Draw ROI & Analyze", font=("bold")).pack(anchor="w")
+        op_frame = ttk.Frame(ctrl_frame)
+        op_frame.pack(fill=tk.X, pady=5)
+        self.btn_draw = ttk.Button(op_frame, text="Start Drawing ROI", command=self.start_drawing, state="disabled")
+        self.btn_draw.pack(side=tk.LEFT, padx=5)
+        self.btn_calc = ttk.Button(op_frame, text="Calculate Mean D inside ROI", command=self.calculate_roi_stats, state="disabled")
+        self.btn_calc.pack(side=tk.LEFT, padx=5)
+        
+        self.lbl_result = ttk.Label(op_frame, text="Result: ---", foreground="blue", font=("Arial", 12, "bold"))
+        self.lbl_result.pack(side=tk.LEFT, padx=20)
+
+        self.fig = plt.Figure(figsize=(8, 6), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        toolbar = NavigationToolbar2Tk(self.canvas, self)
+        toolbar.update()
+
+    def load_ref_image(self):
+        path = filedialog.askopenfilename(title="Select Reference Image", filetypes=[("Images", "*.tif *.tiff *.png *.jpg"), ("All", "*.*")])
+        if not path: return
+        try:
+            if path.lower().endswith(('.tif', '.tiff')):
+                raw = prep.load_tiff(path)
+                # Ensure 2D
+                if raw.ndim >= 4: raw = raw[:, 0, ...]
+                if raw.ndim == 3: self.ref_image = np.mean(raw, axis=0)
+                elif raw.ndim == 2: self.ref_image = raw
+                else: self.ref_image = raw[0]
+            else:
+                self.ref_image = plt.imread(path)
+                if self.ref_image.ndim == 3: self.ref_image = np.mean(self.ref_image, axis=2)
+            
+            self.refresh_plot()
+            self.check_ready()
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def load_diff_data(self):
+        path = filedialog.askopenfilename(title="Select Diffusion Map CSV", filetypes=[("CSV files", "*.csv"), ("All", "*.*")])
+        if not path: return
+        try:
+            self.diff_map = np.loadtxt(path, delimiter=',')
+            self.refresh_plot()
+            self.check_ready()
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def check_ready(self):
+        if self.ref_image is not None or self.diff_map is not None:
+            self.btn_draw.config(state="normal")
+        if self.diff_map is not None:
+            self.btn_calc.config(state="normal")
+
+    def refresh_plot(self):
+        self.ax.cla()
+        if self.ref_image is not None:
+            self.ax.imshow(self.ref_image, cmap='gray', alpha=1.0)
+        if self.diff_map is not None:
+            masked_map = np.ma.masked_invalid(self.diff_map)
+            self.ax.imshow(masked_map, cmap='jet', alpha=0.5)
+        self.ax.set_title("Reference Image + Diffusion Map Overlay")
+        self.canvas.draw()
+
+    def start_drawing(self):
+        if self.poly_selector: self.poly_selector.disconnect()
+        self.roi_verts = None
+        self.lbl_result.config(text="Result: Drawing... Click points, click start to finish.")
+        def on_select(verts):
+            self.roi_verts = verts
+            self.lbl_result.config(text="Result: ROI Defined. Press Calculate.")
+        self.poly_selector = PolygonSelector(self.ax, on_select, props=dict(color='r', linewidth=2, alpha=0.8))
+
+    def calculate_roi_stats(self):
+        if self.diff_map is None or self.roi_verts is None: return
+        try:
+            H, W = self.diff_map.shape
+            y, x = np.mgrid[:H, :W]
+            points = np.vstack((x.ravel(), y.ravel())).T
+            path = Path(self.roi_verts)
+            mask = path.contains_points(points).reshape(H, W)
+            roi_values = self.diff_map[mask]
+            valid_values = roi_values[np.isfinite(roi_values)]
+            
+            if len(valid_values) == 0:
+                res_str = "No valid data in ROI."
+            else:
+                mean_val = np.mean(valid_values)
+                std_val = np.std(valid_values)
+                res_str = f"Mean D: {mean_val:.3f} ± {std_val:.3f} (n={len(valid_values)})"
+                cx = np.mean([v[0] for v in self.roi_verts])
+                cy = np.mean([v[1] for v in self.roi_verts])
+                self.ax.text(cx, cy, f"{mean_val:.2f}", color='white', fontweight='bold', ha='center',
+                             bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+                self.canvas.draw()
+
+            self.lbl_result.config(text=res_str)
+            messagebox.showinfo("ROI Analysis Result", res_str)
+        except Exception as e: messagebox.showerror("Calculation Error", str(e))
+
+
+# =============================================================================
+# ★ Main Application Class
 # =============================================================================
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v20.0 (Batch Window Integration)")
+        self.root.title("RICS Analysis App v22.2 (Complete Integration)")
         self.root.geometry("1400x1000")
 
-        # Mac Dock Click Fix
-        if platform.system() == "Darwin":
-            try:
-                def on_dock_click(*args):
-                    self.root.deiconify(); self.root.lift()
-                self.root.createcommand("::tk::mac::ReopenApplication", on_dock_click)
-            except: pass
+        setup_dock_icon(self.root)
 
         # Data holders
-        self.raw_stack = None; self.processed_full = None
-        self.roi_data = None; self.acf_data = None
+        self.raw_stack = None       
+        self.processed_full = None
+        self.roi_data = None
+        self.acf_data = None
         self.current_file_path = None
-        self.current_frame_idx = -1; self.total_frames = 0
-        self.fixed_ylim_x = None; self.fixed_ylim_y = None
         
-        self.heatmap_d_map = None; self.hm_window = None 
-        self.heatmap_thread = None; self.stop_event = threading.Event()
+        # Display settings
+        self.current_frame_idx = -1
+        self.total_frames = 0
+        self.fixed_ylim_x = None
+        self.fixed_ylim_y = None
+        
+        # Heatmap results
+        self.heatmap_d_map = None
+        self.hm_window = None 
+        
+        # Threading
+        self.heatmap_thread = None
+        self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
+        
+        # Process mgmt
         self.caffeinate_process = None
-        self.live_fit_data = None; self.live_fit_lock = threading.Lock()
+        
+        # Live Plot
+        self.live_fit_data = None 
+        self.live_fit_lock = threading.Lock()
         
         # Batch State
         self.is_batch_running = False
@@ -284,7 +398,7 @@ class RICSApp:
         self.batch_params = None 
         self.batch_stop_req = False
 
-        # GUI Variables (Main Window)
+        # GUI Variables
         self.pixel_size_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0) 
         self.pixel_dwell_var = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
         self.line_time_var = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0) 
@@ -309,8 +423,10 @@ class RICSApp:
         self.frame_info_var = tk.StringVar(value="No Data")
         self.batch_info_var = tk.StringVar(value="Batch: Idle")
         
-        self.drag_lines = {}; self.dragging_item = None
-        self.selector = None; self.press_xy = None
+        self.drag_lines = {}
+        self.dragging_item = None
+        self.selector = None
+        self.press_xy = None
 
         self.create_layout()
         self.setup_plots()
@@ -345,9 +461,9 @@ class RICSApp:
         self.file_label = ttk.Label(parent, text="No file loaded", wraplength=350)
         self.file_label.pack()
         
-        # Batch Button
         batch_frame = ttk.LabelFrame(parent, text="Batch Processing"); batch_frame.pack(fill=tk.X, pady=5)
         ttk.Button(batch_frame, text="Open Batch Config Window", command=self.open_batch_window).pack(fill=tk.X, pady=2)
+        ttk.Button(batch_frame, text="Open ROI Analysis Tool (Offline)", command=self.open_roi_tool).pack(fill=tk.X, pady=2)
         ttk.Label(batch_frame, textvariable=self.batch_info_var, foreground="red", font=("Arial", 10, "bold"), wraplength=350).pack(anchor="w")
         
         f_info = ttk.LabelFrame(parent, text="Frame Viewer"); f_info.pack(fill=tk.X, pady=5)
@@ -503,6 +619,9 @@ class RICSApp:
     # =======================================================
     # Batch & Core Logic
     # =======================================================
+    def open_roi_tool(self):
+        ROIAnalysisWindow(self.root)
+
     def open_batch_window(self):
         root_dir = filedialog.askdirectory(title="Select Root Directory for Batch Analysis")
         if not root_dir: return
@@ -532,14 +651,8 @@ class RICSApp:
         
         try:
             self.load_file_internal(fpath)
-            # Apply Batch Params
             p = self.batch_params
             self.ma_window_var.set(p['mov_avg'])
-            self.pixel_size_var.set(p['scan_params']['pixel_size']*1e3)
-            self.pixel_dwell_var.set(p['scan_params']['pixel_dwell']*1e6)
-            self.line_time_var.set(p['scan_params']['line_time']*1e3)
-            
-            # Apply ROI from batch (Handle out of bounds)
             _, H, W = self.raw_stack.shape
             rx, ry, rw, rh = p['roi']
             if rx+rw <= W and ry+rh <= H:
@@ -570,7 +683,9 @@ class RICSApp:
     def save_batch_result(self):
         if self.heatmap_d_map is None: return
         p = self.batch_params['output']
-        save_path = os.path.splitext(self.current_file_path)[0] + "_heatmap.png"
+        base_path = os.path.splitext(self.current_file_path)[0]
+        save_path = base_path + "_heatmap.png"
+        csv_path = base_path + "_heatmap_data.csv"
         try:
             fig_temp = plt.figure(figsize=(6, 5))
             ax_temp = fig_temp.add_subplot(111)
@@ -584,11 +699,14 @@ class RICSApp:
             ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
             fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
             fig_temp.savefig(save_path, dpi=300); plt.close(fig_temp)
-            print(f"Saved: {save_path}")
+            
+            # Save CSV
+            np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
+            print(f"Saved: {save_path} & {csv_path}")
         except Exception as e: print(f"Save Error: {e}")
 
     # =======================================================
-    # Main Logic
+    # Main Logic (Restored)
     # =======================================================
     def load_data(self):
         filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif"), ("All files", "*.*")])
@@ -598,9 +716,9 @@ class RICSApp:
     def load_file_internal(self, filepath):
         try:
             self.file_label.config(text=os.path.basename(filepath))
-            # ★ Robust loading logic inside gui_app.py
+            # Robust loading logic integrated
             img = prep.load_tiff(filepath)
-            # Handle extra dimensions manually since we can't edit src/preprocessing.py easily
+            # Handle extra dimensions manually if prep isn't updated
             img = np.squeeze(img)
             if img.ndim == 2: img = img[np.newaxis, :, :]
             elif img.ndim >= 4:
@@ -743,7 +861,7 @@ class RICSApp:
                             "sx_axis": sx, "x_slice_vals": acf[scy, :], "x_curve": xc, "range_x": crx,
                             "sy_axis": sy, "y_slice_vals": acf[:, scx], "y_curve": yc, "range_y": cry
                         }
-                except Exception: pass
+                except Exception as e: print(f"Fit Error: {e}")
         self.heatmap_d_map = d_map
 
     def monitor_heatmap_thread(self):
@@ -771,7 +889,6 @@ class RICSApp:
             self.ax_y.axvline(-d["range_y"], color='orange', ls='--'); self.ax_y.axvline(d["range_y"], color='orange', ls='--')
             self.ax_y.set_title("Live Y Fit")
             
-            # Zoom logic for live plot
             def apply_zoom(ax, axis, vals, limit):
                 ax.set_xlim(-limit*1.5, limit*1.5)
                 mask = np.abs(axis) <= (limit * 1.5)
@@ -822,6 +939,16 @@ class RICSApp:
         im = self.hm_ax.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
         self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
         self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
+        
+        # Auto-Save CSV
+        if self.current_file_path:
+            base = os.path.splitext(self.current_file_path)[0]
+            try: np.savetxt(base + "_heatmap_data.csv", self.heatmap_d_map, delimiter=',')
+            except: pass
+            
+        # ★ Button to open ROI tool
+        tk.Button(self.hm_window, text="Draw Freehand ROI & Calc Mean", command=self.open_roi_tool).pack(pady=5)
+        
         self.hm_canvas.draw()
 
     def save_heatmap_image(self):
@@ -848,7 +975,11 @@ class RICSApp:
                 ax_temp.set_title("Diffusion Map")
                 fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
                 fig_temp.savefig(filepath, dpi=300); plt.close(fig_temp)
-                messagebox.showinfo("Success", f"Saved: {filepath}")
+                
+                csv_path = os.path.splitext(filepath)[0] + ".csv"
+                np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
+                
+                messagebox.showinfo("Success", f"Saved PNG & CSV:\n{filepath}")
             except Exception as e: messagebox.showerror("Error", str(e))
 
     def save_graphs(self):
@@ -862,14 +993,17 @@ class RICSApp:
         self.ax_img.cla(); self.ax_x.cla(); self.ax_y.cla(); self.ax_3d.cla()
         self.drag_lines = {}
         if self.processed_full is None or self.acf_data is None: self.canvas_fig.draw(); return
+        
         if self.current_frame_idx == -1: display_img = np.mean(self.processed_full, axis=0); title = "Average Image"
         else: idx = min(max(0, self.current_frame_idx), self.total_frames-1); display_img = self.processed_full[idx]; title = f"Frame {idx}/{self.total_frames-1}"
+        
         self.ax_img.imshow(display_img, cmap='gray')
         self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
         x, y, w, h = self.roi_coords
         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
         self.ax_img.add_patch(rect)
+        
         H, W = self.acf_data.shape; cy, cx = H // 2, W // 2
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]; y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
@@ -879,10 +1013,8 @@ class RICSApp:
         
         def plot_slice(ax, axis_vals, data_vals, fit_vals, title, fit_limit, line_prefix):
             dvals = np.abs(axis_vals)
-            # Fix mask logic deprecation and zoom
             mask_omit_arr = (dvals <= omit_r) if omit_r > 0 else np.zeros_like(dvals, dtype=bool)
             mask_active = (dvals <= fit_limit) & (~mask_omit_arr)
-            
             ax.plot(axis_vals, data_vals, 'b-', alpha=0.2)
             ax.plot(axis_vals[mask_active], data_vals[mask_active], 'bo', markersize=4)
             if fit_vals is not None: ax.plot(axis_vals, fit_vals, 'r-', linewidth=2)
@@ -902,9 +1034,8 @@ class RICSApp:
         self.ax_3d.plot_surface(X_grid, Y_grid, self.acf_data, cmap='viridis', alpha=0.8)
         if fit_data is not None: self.ax_3d.plot_wireframe(X_grid, Y_grid, fit_data, color='red', alpha=0.5, rcount=10, ccount=10)
         mask_3d = (X_grid**2 + Y_grid**2) > (omit_r**2) if omit_r>0 else True
-        vz = self.acf_data[mask_3d]; 
+        vz = self.acf_data[mask_3d]
         if len(vz)>0: self.ax_3d.set_zlim(np.min(vz), np.max(vz))
-        self.fixed_ylim_x = self.ax_x.get_ylim(); self.fixed_ylim_y = self.ax_y.get_ylim()
         self.canvas_fig.draw()
 
 if __name__ == "__main__":
