@@ -14,7 +14,7 @@ import glob
 import platform
 import subprocess
 
-# 自作モジュールのインポート (計算ロジックのみ src から)
+# 自作モジュールのインポート
 import config as cfg
 from src import preprocessing as prep
 from src import calculation as calc
@@ -24,7 +24,6 @@ from src import model
 # ★ Mac Utilities
 # =============================================================================
 def disable_app_nap():
-    """App Nap (省電力機能) を無効化"""
     try:
         import appnope
         appnope.nope()
@@ -32,7 +31,6 @@ def disable_app_nap():
         pass
 
 def setup_dock_icon(root):
-    """最小化したアプリをDockクリックで戻せるようにする"""
     if platform.system() == "Darwin":
         try:
             def on_dock_click(*args):
@@ -42,7 +40,6 @@ def setup_dock_icon(root):
         except Exception:
             pass
 
-# 初期化時に実行
 disable_app_nap()
 
 
@@ -61,7 +58,6 @@ class BatchConfigWindow(tk.Toplevel):
         self.current_preview_data = None
         self.roi_coords = (0, 0, 0, 0)
         
-        # UI Variables
         self.ma_win = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
         self.px_size = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0)
         self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
@@ -171,26 +167,16 @@ class BatchConfigWindow(tk.Toplevel):
         idx = self.file_lb.curselection()
         if not idx: return
         fpath = self.file_list[idx[0]]
-        
         try:
             raw = prep.load_tiff(fpath)
-            # Ensure 3D -> 2D preview
             if raw.ndim >= 4: raw = raw[:, 0, ...] 
-            
-            if raw.ndim == 3:
-                self.current_preview_data = np.mean(raw, axis=0)
-            elif raw.ndim == 2:
-                self.current_preview_data = raw
-            else:
-                self.current_preview_data = raw[0]
-
+            if raw.ndim == 3: self.current_preview_data = np.mean(raw, axis=0)
+            elif raw.ndim == 2: self.current_preview_data = raw
+            else: self.current_preview_data = raw[0]
             H, W = self.current_preview_data.shape
-            if self.roi_coords == (0, 0, 0, 0):
-                self.roi_coords = (0, 0, W, H)
-                
+            if self.roi_coords == (0, 0, 0, 0): self.roi_coords = (0, 0, W, H)
             self._redraw_preview()
-        except Exception as e:
-            print(f"Preview Error: {e}")
+        except Exception as e: print(f"Preview Error: {e}")
 
     def _on_select_roi(self, eclick, erelease):
         x1, y1 = int(eclick.xdata), int(eclick.ydata)
@@ -231,12 +217,17 @@ class ROIAnalysisWindow(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
         self.title("Freehand ROI Analysis Tool")
-        self.geometry("1000x800")
+        self.geometry("1100x850")
         
         self.ref_image = None
         self.diff_map = None
         self.poly_selector = None
         self.roi_verts = None
+        
+        self.disp_auto = tk.BooleanVar(value=True)
+        self.disp_perc = tk.DoubleVar(value=95.0)
+        self.disp_max = tk.DoubleVar(value=50.0)
+        self.view_mode = tk.StringVar(value="heatmap")
         
         self._create_layout()
 
@@ -244,22 +235,34 @@ class ROIAnalysisWindow(tk.Toplevel):
         ctrl_frame = ttk.Frame(self, padding=10)
         ctrl_frame.pack(side=tk.TOP, fill=tk.X)
         
-        ttk.Label(ctrl_frame, text="Step 1: Load Files", font=("bold")).pack(anchor="w")
-        btn_frame = ttk.Frame(ctrl_frame)
-        btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(btn_frame, text="1. Load Reference Image (Tiff/Png)", command=self.load_ref_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="2. Load Diffusion Data (.csv)", command=self.load_diff_data).pack(side=tk.LEFT, padx=5)
+        ttk.Label(ctrl_frame, text="1. Load Files", font=("bold")).pack(anchor="w")
+        btn_frame = ttk.Frame(ctrl_frame); btn_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_frame, text="Load Reference Image", command=self.load_ref_image).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Load Diffusion CSV", command=self.load_diff_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Reset All", command=self.reset_all).pack(side=tk.RIGHT, padx=5)
         
         ttk.Separator(ctrl_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+        ttk.Label(ctrl_frame, text="2. Display Settings (Does not overlay)", font=("bold")).pack(anchor="w")
+        view_frame = ttk.Frame(ctrl_frame); view_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(view_frame, text="Show: ").pack(side=tk.LEFT)
+        ttk.Radiobutton(view_frame, text="Heatmap", variable=self.view_mode, value="heatmap", command=self.refresh_plot).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(view_frame, text="Reference Image", variable=self.view_mode, value="reference", command=self.refresh_plot).pack(side=tk.LEFT, padx=5)
         
-        ttk.Label(ctrl_frame, text="Step 2: Draw ROI & Analyze", font=("bold")).pack(anchor="w")
-        op_frame = ttk.Frame(ctrl_frame)
-        op_frame.pack(fill=tk.X, pady=5)
+        scale_frame = ttk.Frame(ctrl_frame); scale_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(scale_frame, text="Heatmap Scale: ").pack(side=tk.LEFT)
+        ttk.Checkbutton(scale_frame, text="Auto (%)", variable=self.disp_auto).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(scale_frame, textvariable=self.disp_perc, width=5).pack(side=tk.LEFT)
+        ttk.Label(scale_frame, text=" or Max D:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(scale_frame, textvariable=self.disp_max, width=6).pack(side=tk.LEFT)
+        ttk.Button(scale_frame, text="Update Heatmap", command=self.refresh_plot).pack(side=tk.LEFT, padx=20)
+        
+        ttk.Separator(ctrl_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+        ttk.Label(ctrl_frame, text="3. Draw ROI & Analyze", font=("bold")).pack(anchor="w")
+        op_frame = ttk.Frame(ctrl_frame); op_frame.pack(fill=tk.X, pady=5)
         self.btn_draw = ttk.Button(op_frame, text="Start Drawing ROI", command=self.start_drawing, state="disabled")
         self.btn_draw.pack(side=tk.LEFT, padx=5)
-        self.btn_calc = ttk.Button(op_frame, text="Calculate Mean D inside ROI", command=self.calculate_roi_stats, state="disabled")
+        self.btn_calc = ttk.Button(op_frame, text="Calculate Mean D", command=self.calculate_roi_stats, state="disabled")
         self.btn_calc.pack(side=tk.LEFT, padx=5)
-        
         self.lbl_result = ttk.Label(op_frame, text="Result: ---", foreground="blue", font=("Arial", 12, "bold"))
         self.lbl_result.pack(side=tk.LEFT, padx=20)
 
@@ -270,13 +273,19 @@ class ROIAnalysisWindow(tk.Toplevel):
         toolbar = NavigationToolbar2Tk(self.canvas, self)
         toolbar.update()
 
+    def reset_all(self):
+        self.ref_image = None; self.diff_map = None; self.roi_verts = None
+        if self.poly_selector: self.poly_selector.disconnect(); self.poly_selector = None
+        self.lbl_result.config(text="Result: ---")
+        self.btn_draw.config(state="disabled"); self.btn_calc.config(state="disabled")
+        self.ax.cla(); self.canvas.draw()
+
     def load_ref_image(self):
         path = filedialog.askopenfilename(title="Select Reference Image", filetypes=[("Images", "*.tif *.tiff *.png *.jpg"), ("All", "*.*")])
         if not path: return
         try:
             if path.lower().endswith(('.tif', '.tiff')):
                 raw = prep.load_tiff(path)
-                # Ensure 2D
                 if raw.ndim >= 4: raw = raw[:, 0, ...]
                 if raw.ndim == 3: self.ref_image = np.mean(raw, axis=0)
                 elif raw.ndim == 2: self.ref_image = raw
@@ -284,9 +293,7 @@ class ROIAnalysisWindow(tk.Toplevel):
             else:
                 self.ref_image = plt.imread(path)
                 if self.ref_image.ndim == 3: self.ref_image = np.mean(self.ref_image, axis=2)
-            
-            self.refresh_plot()
-            self.check_ready()
+            self.view_mode.set("reference"); self.refresh_plot(); self.check_ready()
         except Exception as e: messagebox.showerror("Error", str(e))
 
     def load_diff_data(self):
@@ -294,37 +301,47 @@ class ROIAnalysisWindow(tk.Toplevel):
         if not path: return
         try:
             self.diff_map = np.loadtxt(path, delimiter=',')
-            self.refresh_plot()
-            self.check_ready()
+            self.view_mode.set("heatmap"); self.refresh_plot(); self.check_ready()
         except Exception as e: messagebox.showerror("Error", str(e))
 
     def check_ready(self):
-        if self.ref_image is not None or self.diff_map is not None:
-            self.btn_draw.config(state="normal")
-        if self.diff_map is not None:
-            self.btn_calc.config(state="normal")
+        if self.ref_image is not None or self.diff_map is not None: self.btn_draw.config(state="normal")
+        if self.diff_map is not None: self.btn_calc.config(state="normal")
 
     def refresh_plot(self):
         self.ax.cla()
-        if self.ref_image is not None:
-            self.ax.imshow(self.ref_image, cmap='gray', alpha=1.0)
-        if self.diff_map is not None:
+        mode = self.view_mode.get()
+        if mode == "heatmap" and self.diff_map is not None:
             masked_map = np.ma.masked_invalid(self.diff_map)
-            self.ax.imshow(masked_map, cmap='jet', alpha=0.5)
-        self.ax.set_title("Reference Image + Diffusion Map Overlay")
+            valid = self.diff_map[np.isfinite(self.diff_map)]
+            vmin, vmax = 0, 1
+            if len(valid) > 0:
+                vmin = np.min(valid)
+                if self.disp_auto.get(): vmax = np.percentile(valid, self.disp_perc.get())
+                else: vmax = self.disp_max.get()
+            self.ax.imshow(masked_map, cmap='jet', vmin=vmin, vmax=vmax)
+            self.ax.set_title("Diffusion Map View")
+        elif mode == "reference" and self.ref_image is not None:
+            self.ax.imshow(self.ref_image, cmap='gray')
+            self.ax.set_title("Reference Image View")
+        elif self.diff_map is not None: self.ax.imshow(self.diff_map, cmap='jet')
+        elif self.ref_image is not None: self.ax.imshow(self.ref_image, cmap='gray')
+            
+        if self.roi_verts is not None:
+            poly = patches.Polygon(self.roi_verts, closed=True, linewidth=2, edgecolor='red', facecolor='none')
+            self.ax.add_patch(poly)
         self.canvas.draw()
 
     def start_drawing(self):
         if self.poly_selector: self.poly_selector.disconnect()
-        self.roi_verts = None
-        self.lbl_result.config(text="Result: Drawing... Click points, click start to finish.")
+        self.lbl_result.config(text="Drawing... Click points, click start to finish.")
         def on_select(verts):
-            self.roi_verts = verts
+            self.roi_verts = verts; self.refresh_plot()
             self.lbl_result.config(text="Result: ROI Defined. Press Calculate.")
         self.poly_selector = PolygonSelector(self.ax, on_select, props=dict(color='r', linewidth=2, alpha=0.8))
 
     def calculate_roi_stats(self):
-        if self.diff_map is None or self.roi_verts is None: return
+        if self.diff_map is None or self.roi_verts is None: messagebox.showwarning("Warning", "Load Diffusion Data and Draw ROI."); return
         try:
             H, W = self.diff_map.shape
             y, x = np.mgrid[:H, :W]
@@ -333,22 +350,16 @@ class ROIAnalysisWindow(tk.Toplevel):
             mask = path.contains_points(points).reshape(H, W)
             roi_values = self.diff_map[mask]
             valid_values = roi_values[np.isfinite(roi_values)]
-            
-            if len(valid_values) == 0:
-                res_str = "No valid data in ROI."
+            if len(valid_values) == 0: res_str = "No valid data in ROI."
             else:
-                mean_val = np.mean(valid_values)
-                std_val = np.std(valid_values)
+                mean_val = np.mean(valid_values); std_val = np.std(valid_values)
                 res_str = f"Mean D: {mean_val:.3f} ± {std_val:.3f} (n={len(valid_values)})"
-                cx = np.mean([v[0] for v in self.roi_verts])
-                cy = np.mean([v[1] for v in self.roi_verts])
-                self.ax.text(cx, cy, f"{mean_val:.2f}", color='white', fontweight='bold', ha='center',
-                             bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+                self.refresh_plot()
+                cx = np.mean([v[0] for v in self.roi_verts]); cy = np.mean([v[1] for v in self.roi_verts])
+                self.ax.text(cx, cy, f"{mean_val:.2f}", color='white', fontweight='bold', ha='center', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
                 self.canvas.draw()
-
-            self.lbl_result.config(text=res_str)
-            messagebox.showinfo("ROI Analysis Result", res_str)
-        except Exception as e: messagebox.showerror("Calculation Error", str(e))
+            self.lbl_result.config(text=res_str); messagebox.showinfo("ROI Result", res_str)
+        except Exception as e: messagebox.showerror("Error", str(e))
 
 
 # =============================================================================
@@ -357,7 +368,7 @@ class ROIAnalysisWindow(tk.Toplevel):
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v22.2 (Complete Integration)")
+        self.root.title("RICS Analysis App v23.1 (Complete)")
         self.root.geometry("1400x1000")
 
         setup_dock_icon(self.root)
@@ -383,9 +394,6 @@ class RICSApp:
         self.heatmap_thread = None
         self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
-        
-        # Process mgmt
-        self.caffeinate_process = None
         
         # Live Plot
         self.live_fit_data = None 
@@ -686,9 +694,15 @@ class RICSApp:
         base_path = os.path.splitext(self.current_file_path)[0]
         save_path = base_path + "_heatmap.png"
         csv_path = base_path + "_heatmap_data.csv"
+        
+        ma_val = self.batch_params['mov_avg']
+        win_val = self.batch_params['heatmap']['win']
+        step_val = self.batch_params['heatmap']['step']
+        info_text = f"Mov.Avg: {ma_val} | Win: {win_val} | Step: {step_val}"
+
         try:
-            fig_temp = plt.figure(figsize=(6, 5))
-            ax_temp = fig_temp.add_subplot(111)
+            fig_temp = plt.figure(figsize=(6, 6))
+            ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
             display_map = self.heatmap_d_map.copy()
             valid = display_map[~np.isnan(display_map)]
             vmin, vmax = None, None
@@ -698,15 +712,14 @@ class RICSApp:
             im = ax_temp.imshow(display_map, cmap='jet', interpolation=p['interp'], vmin=vmin, vmax=vmax)
             ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
             fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
+            fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
             fig_temp.savefig(save_path, dpi=300); plt.close(fig_temp)
-            
-            # Save CSV
             np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
             print(f"Saved: {save_path} & {csv_path}")
         except Exception as e: print(f"Save Error: {e}")
 
     # =======================================================
-    # Main Logic (Restored)
+    # Main Logic
     # =======================================================
     def load_data(self):
         filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif"), ("All files", "*.*")])
@@ -716,9 +729,7 @@ class RICSApp:
     def load_file_internal(self, filepath):
         try:
             self.file_label.config(text=os.path.basename(filepath))
-            # Robust loading logic integrated
             img = prep.load_tiff(filepath)
-            # Handle extra dimensions manually if prep isn't updated
             img = np.squeeze(img)
             if img.ndim == 2: img = img[np.newaxis, :, :]
             elif img.ndim >= 4:
@@ -771,9 +782,9 @@ class RICSApp:
         X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
         xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel())); ydata_flat = self.acf_data.ravel()
         omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        mask_omit = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
+        mask_omit_arr = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
         mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
-        mask_valid = ~(mask_omit | mask_range)
+        mask_valid = ~(mask_omit_arr | mask_range)
         x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
         if len(y_fit) == 0: return
         scan_params = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
@@ -861,7 +872,7 @@ class RICSApp:
                             "sx_axis": sx, "x_slice_vals": acf[scy, :], "x_curve": xc, "range_x": crx,
                             "sy_axis": sy, "y_slice_vals": acf[:, scx], "y_curve": yc, "range_y": cry
                         }
-                except Exception as e: print(f"Fit Error: {e}")
+                except Exception: pass
         self.heatmap_d_map = d_map
 
     def monitor_heatmap_thread(self):
@@ -940,24 +951,27 @@ class RICSApp:
         self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
         self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
         
-        # Auto-Save CSV
         if self.current_file_path:
             base = os.path.splitext(self.current_file_path)[0]
             try: np.savetxt(base + "_heatmap_data.csv", self.heatmap_d_map, delimiter=',')
             except: pass
             
-        # ★ Button to open ROI tool
         tk.Button(self.hm_window, text="Draw Freehand ROI & Calc Mean", command=self.open_roi_tool).pack(pady=5)
-        
         self.hm_canvas.draw()
 
     def save_heatmap_image(self):
         if self.heatmap_d_map is None: return
         filepath = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png"), ("All", "*.*")])
+        
+        ma_val = self.ma_window_var.get()
+        win_val = self.hm_window_var.get()
+        step_val = self.hm_step_var.get()
+        info_text = f"Mov.Avg: {ma_val} | Win: {win_val} | Step: {step_val}"
+
         if filepath:
             try:
-                fig_temp = plt.figure(figsize=(6, 5))
-                ax_temp = fig_temp.add_subplot(111)
+                fig_temp = plt.figure(figsize=(6, 6))
+                ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
                 display_map = self.heatmap_d_map.copy()
                 vmin, vmax = None, None
                 if self.hm_autoscale_var.get():
@@ -974,6 +988,7 @@ class RICSApp:
                 im = ax_temp.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
                 ax_temp.set_title("Diffusion Map")
                 fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
+                fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
                 fig_temp.savefig(filepath, dpi=300); plt.close(fig_temp)
                 
                 csv_path = os.path.splitext(filepath)[0] + ".csv"
@@ -993,23 +1008,18 @@ class RICSApp:
         self.ax_img.cla(); self.ax_x.cla(); self.ax_y.cla(); self.ax_3d.cla()
         self.drag_lines = {}
         if self.processed_full is None or self.acf_data is None: self.canvas_fig.draw(); return
-        
         if self.current_frame_idx == -1: display_img = np.mean(self.processed_full, axis=0); title = "Average Image"
         else: idx = min(max(0, self.current_frame_idx), self.total_frames-1); display_img = self.processed_full[idx]; title = f"Frame {idx}/{self.total_frames-1}"
-        
         self.ax_img.imshow(display_img, cmap='gray')
         self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
         x, y, w, h = self.roi_coords
         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
         self.ax_img.add_patch(rect)
-        
         H, W = self.acf_data.shape; cy, cx = H // 2, W // 2
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]; y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
-        
-        omit_r = self.omit_radius_var.get()
-        range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
+        omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
         
         def plot_slice(ax, axis_vals, data_vals, fit_vals, title, fit_limit, line_prefix):
             dvals = np.abs(axis_vals)
@@ -1018,8 +1028,6 @@ class RICSApp:
             ax.plot(axis_vals, data_vals, 'b-', alpha=0.2)
             ax.plot(axis_vals[mask_active], data_vals[mask_active], 'bo', markersize=4)
             if fit_vals is not None: ax.plot(axis_vals, fit_vals, 'r-', linewidth=2)
-            
-            # Zoom logic
             ax.set_xlim(-fit_limit*1.5, fit_limit*1.5)
             if np.any(mask_active): 
                 v = data_vals[mask_active]; mn, mx = np.min(v), np.max(v)
@@ -1034,7 +1042,7 @@ class RICSApp:
         self.ax_3d.plot_surface(X_grid, Y_grid, self.acf_data, cmap='viridis', alpha=0.8)
         if fit_data is not None: self.ax_3d.plot_wireframe(X_grid, Y_grid, fit_data, color='red', alpha=0.5, rcount=10, ccount=10)
         mask_3d = (X_grid**2 + Y_grid**2) > (omit_r**2) if omit_r>0 else True
-        vz = self.acf_data[mask_3d]
+        vz = self.acf_data[mask_3d]; 
         if len(vz)>0: self.ax_3d.set_zlim(np.min(vz), np.max(vz))
         self.canvas_fig.draw()
 
