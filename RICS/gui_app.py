@@ -1,3 +1,4 @@
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import numpy as np
@@ -84,6 +85,11 @@ class BatchConfigWindow(tk.Toplevel):
         self.hm_max = tk.DoubleVar(value=100.0)
         self.hm_interp = tk.StringVar(value="nearest")
 
+        self.roi_mode_var = tk.StringVar(value="common")  # "common" or "individual"
+        self.roi_map = {}  # {filepath: {'type': 'rect', 'data': [x, y, w, h]}}
+        self.common_roi = None  # 共通ROIデータ
+        self.current_poly_patch = None # ポリゴン表示用
+
         self._create_layout()
         
         if self.file_list:
@@ -114,7 +120,19 @@ class BatchConfigWindow(tk.Toplevel):
 
         center_frame = ttk.Frame(self, padding=5)
         center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ttk.Label(center_frame, text="Preview & ROI Selection (Applied to ALL)", font=("bold")).pack(anchor="w")
+
+        roi_ctrl_frame = ttk.LabelFrame(center_frame, text="ROI Settings")
+        roi_ctrl_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Radiobutton(roi_ctrl_frame, text="Apply Common ROI to All", variable=self.roi_mode_var, value="common", command=self._refresh_roi_display).pack(anchor="w")
+        ttk.Radiobutton(roi_ctrl_frame, text="Set Individual ROI for Each", variable=self.roi_mode_var, value="individual", command=self._refresh_roi_display).pack(anchor="w")
+        
+        btn_frame = ttk.Frame(roi_ctrl_frame)
+        btn_frame.pack(fill=tk.X, pady=2)
+        ttk.Button(btn_frame, text="Save ROI", command=self.save_current_roi).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Load ROI", command=self.load_current_roi).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(center_frame, text="Preview & ROI Selection", font=("bold")).pack(anchor="w")
         
         self.fig = plt.Figure(figsize=(5, 5), dpi=100)
         self.ax = self.fig.add_subplot(111)
@@ -170,6 +188,7 @@ class BatchConfigWindow(tk.Toplevel):
         idx = self.file_lb.curselection()
         if not idx: return
         fpath = self.file_list[idx[0]]
+        self.current_file_path = fpath # パスを保持
         try:
             raw = prep.load_tiff(fpath)
             if raw.ndim >= 4: raw = raw[:, 0, ...] 
@@ -177,9 +196,156 @@ class BatchConfigWindow(tk.Toplevel):
             elif raw.ndim == 2: self.current_preview_data = raw
             else: self.current_preview_data = raw[0]
             H, W = self.current_preview_data.shape
-            if self.roi_coords == (0, 0, 0, 0): self.roi_coords = (0, 0, W, H)
-            self._redraw_preview()
+
+            # 初期化: まだ共通ROIがない場合は全画面
+            if self.common_roi is None:
+                self.common_roi = {'type': 'rect', 'data': [0, 0, W, H]}
+                self.roi_coords = (0, 0, W, H)
+
+            self._refresh_roi_display() # 画像更新とROI描画
         except Exception as e: print(f"Preview Error: {e}")
+
+    def _refresh_roi_display(self):
+        """現在のモードとファイルに基づいてROIを表示"""
+        if self.current_preview_data is None: return
+        
+        self.ax.cla()
+        self.ax.imshow(self.current_preview_data, cmap='gray')
+        self.ax.set_title(f"ROI: {self.roi_mode_var.get()}")
+        
+        # 表示すべきROIデータを取得
+        target_roi = None
+        if self.roi_mode_var.get() == "common":
+            target_roi = self.common_roi
+        else:
+            # 個別モード
+            if self.current_file_path in self.roi_map:
+                target_roi = self.roi_map[self.current_file_path]
+            else:
+                # 未設定の場合はデフォルト(全画面)または空
+                H, W = self.current_preview_data.shape
+                target_roi = {'type': 'rect', 'data': [0, 0, W, H]}
+                # マップに登録しておく
+                self.roi_map[self.current_file_path] = target_roi
+
+        # 描画とセレクターの制御
+        if target_roi:
+            if target_roi['type'] == 'rect':
+                x, y, w, h = target_roi['data']
+                self.roi_coords = (x, y, w, h)
+                
+                # RectangleSelectorを有効化・同期
+                self.selector.set_active(True)
+                self.selector.set_visible(True)
+                # extentsを設定して表示を同期 (xmin, xmax, ymin, ymax)
+                self.selector.extents = (x, x+w, y, y+h)
+                
+                # パッチ描画 (Selectorが表示するので不要だが、明示的に描くなら)
+                rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
+                self.ax.add_patch(rect)
+                
+            elif target_roi['type'] == 'poly':
+                # ポリゴンの場合は矩形セレクターを無効化してパッチだけ表示
+                self.selector.set_active(False)
+                self.selector.set_visible(False)
+                verts = target_roi['data']
+                poly = patches.Polygon(verts, closed=True, linewidth=2, edgecolor='cyan', facecolor='none')
+                self.ax.add_patch(poly)
+                self.roi_coords = (0,0,0,0) # ダミー
+
+        self.canvas.draw()
+
+    def _on_select_roi(self, eclick, erelease):
+        """矩形選択時のコールバック"""
+        x1, y1 = int(eclick.xdata), int(eclick.ydata)
+        x2, y2 = int(erelease.xdata), int(erelease.ydata)
+        xmin, xmax = sorted([x1, x2])
+        ymin, ymax = sorted([y1, y2])
+        w, h = xmax - xmin, ymax - ymin
+        
+        new_roi = {'type': 'rect', 'data': [xmin, ymin, w, h]}
+        self.roi_coords = (xmin, ymin, w, h)
+        
+        # モードに応じてデータを更新
+        if self.roi_mode_var.get() == "common":
+            self.common_roi = new_roi
+        else:
+            if self.current_file_path:
+                self.roi_map[self.current_file_path] = new_roi
+
+    def save_current_roi(self):
+        """現在のROIをJSON保存"""
+        # 現在表示中のROIデータを特定
+        target_roi = self.common_roi if self.roi_mode_var.get() == "common" else self.roi_map.get(self.current_file_path)
+        
+        if not target_roi: return
+        
+        fpath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if fpath:
+            try:
+                with open(fpath, 'w') as f:
+                    json.dump(target_roi, f)
+                messagebox.showinfo("Saved", f"ROI saved to {os.path.basename(fpath)}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+    def load_current_roi(self):
+        """JSONからROIを読込"""
+        fpath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not fpath: return
+        
+        try:
+            with open(fpath, 'r') as f:
+                loaded_roi = json.load(f)
+            
+            # 形式チェック
+            if 'type' not in loaded_roi or 'data' not in loaded_roi:
+                raise ValueError("Invalid ROI file format")
+
+            # データ更新
+            if self.roi_mode_var.get() == "common":
+                self.common_roi = loaded_roi
+            else:
+                if self.current_file_path:
+                    self.roi_map[self.current_file_path] = loaded_roi
+            
+            # 再描画
+            self._refresh_roi_display()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load ROI: {e}")
+
+    def _on_run(self):
+        # ★ バリデーション: 個別モードの場合、全ファイルにROIが設定されているか確認
+        if self.roi_mode_var.get() == "individual":
+            missing = [f for f in self.file_list if f not in self.roi_map]
+            if missing:
+                msg = f"ROI is not set for {len(missing)} files.\nFirst missing: {os.path.basename(missing[0])}"
+                messagebox.showwarning("ROI Missing", msg)
+                return
+            
+            # パラメータにROIマップを渡す
+            roi_param = self.roi_map
+        else:
+            # 共通モード
+            roi_param = self.common_roi
+
+        params = {
+            'mov_avg': self.ma_win.get(),
+            'scan_params': {'pixel_size': self.px_size.get() * 1e-3, 'pixel_dwell': self.px_dwell.get() * 1e-6, 'line_time': self.line_time.get() * 1e-3},
+            'fit_params': {"D": self.fit_D.get(), "G0": self.fit_G0.get(), "w0": self.fit_w0.get(), "wz": self.fit_wz.get()},
+            'fixed_params': {"w0": self.fix_w0.get(), "wz": self.fix_wz.get(), "D": False, "G0": False},
+            'heatmap': {
+                'win': self.hm_win.get(), 'step': self.hm_step.get(),
+                'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
+                'auto_range': self.auto_range.get(),
+                'mask': self.mask_outside.get()
+            },
+            'roi': roi_param, # ★ 変更: 辞書または単一ROIデータを渡す
+            'output': {'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(), 'max': self.hm_max.get(), 'interp': self.hm_interp.get()}
+        }
+        self.execute_callback(self.file_list, params)
+        self.destroy()
 
     def _on_select_roi(self, eclick, erelease):
         x1, y1 = int(eclick.xdata), int(eclick.ydata)
@@ -216,7 +382,6 @@ class BatchConfigWindow(tk.Toplevel):
         }
         self.execute_callback(self.file_list, params)
         self.destroy()
-
 
 # =============================================================================
 # ★ ROI Analysis Window Class
@@ -380,6 +545,7 @@ class RICSApp:
         self.root = root
         self.root.title("RICS Analysis App v23.7 (Fixed ROI Logic)")
         self.root.geometry("1400x1000")
+        self.roi_verts = None
 
         setup_dock_icon(self.root)
 
@@ -513,6 +679,10 @@ class RICSApp:
         ttk.Button(roi_btns, text="Rect ROI", command=self.use_rect_roi, width=8).pack(side=tk.LEFT, padx=2)
         ttk.Button(roi_btns, text="Draw Poly", command=self.use_poly_roi, width=8).pack(side=tk.LEFT, padx=2)
         ttk.Button(roi_btns, text="Reset", command=self.reset_roi, width=8).pack(side=tk.LEFT, padx=2)
+
+        io_btns = ttk.Frame(roi_grp); io_btns.pack(fill=tk.X, pady=2)
+        ttk.Button(io_btns, text="Save ROI", command=self.save_roi).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        ttk.Button(io_btns, text="Load ROI", command=self.load_roi).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         
         self._add_roi_entry(roi_grp, "Size W:", self.roi_w_var, " H:", self.roi_h_var)
         self._add_roi_entry(roi_grp, "Center X:", self.roi_cx_var, " Y:", self.roi_cy_var)
@@ -574,6 +744,66 @@ class RICSApp:
         ttk.Button(hm_btns, text="Regen View", command=self.plot_heatmap_result).pack(side=tk.LEFT, padx=5)
         
         ttk.Button(parent, text="Save Heatmap", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
+
+    def save_roi(self):
+        """現在のROIをJSON形式で保存"""
+        data = {}
+        if self.roi_mode == "poly" and self.roi_verts is not None:
+            # numpy配列などはリストに変換
+            data = {'type': 'poly', 'data': np.array(self.roi_verts).tolist()}
+        else:
+            # Rectモード
+            data = {'type': 'rect', 'data': list(self.roi_coords)}
+            
+        fpath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if fpath:
+            try:
+                with open(fpath, 'w') as f:
+                    json.dump(data, f)
+                messagebox.showinfo("Success", "ROI Saved.")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+    def load_roi(self):
+        """JSONからROIを読み込んで適用"""
+        fpath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not fpath: return
+        
+        try:
+            with open(fpath, 'r') as f:
+                data = json.load(f)
+            
+            roi_type = data.get('type')
+            roi_data = data.get('data')
+            
+            if roi_type == 'poly':
+                self.use_poly_roi() # モード切替
+                self.roi_verts = roi_data
+                # マスク生成と描画更新
+                # on_poly相当の処理を実行
+                if self.raw_stack is not None:
+                    _, H, W = self.raw_stack.shape
+                    y, x = np.mgrid[:H, :W]
+                    points = np.vstack((x.ravel(), y.ravel())).T
+                    path = Path(self.roi_verts)
+                    mask = path.contains_points(points).reshape(H, W)
+                    self.roi_mask = mask
+                    
+                    # BBox計算
+                    xs = [v[0] for v in self.roi_verts]; ys = [v[1] for v in self.roi_verts]
+                    x1, x2 = int(min(xs)), int(max(xs))
+                    y1, y2 = int(min(ys)), int(max(ys))
+                    self.roi_coords = (x1, y1, x2-x1, y2-y1)
+                    
+                    self.update_processing_and_acf()
+                    
+            elif roi_type == 'rect':
+                self.use_rect_roi() # モード切替
+                self.roi_coords = tuple(roi_data)
+                self.update_processing_and_acf()
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load ROI: {e}")
 
     def _add_entry(self, p, l, v):
         f = ttk.Frame(p); f.pack(fill=tk.X, pady=1)
@@ -657,6 +887,7 @@ class RICSApp:
         
         # 5. コールバック定義
         def on_poly(verts):
+            self.roi_verts = verts
             if self.raw_stack is None: return
             _, H, W = self.raw_stack.shape
             y, x = np.mgrid[:H, :W]
@@ -786,17 +1017,49 @@ class RICSApp:
             p = self.batch_params
             self.ma_window_var.set(p['mov_avg'])
             _, H, W = self.raw_stack.shape
-            rx, ry, rw, rh = p['roi']
-            if rx+rw <= W and ry+rh <= H:
-                self.roi_w_var.set(rw); self.roi_h_var.set(rh)
-                self.roi_cx_var.set(rx + rw//2); self.roi_cy_var.set(ry + rh//2)
-            else: self.set_full_roi(show_visuals=True)
+            roi_data_src = p['roi'] # 辞書(個別) または dict(共通データ)
+            
+            # 個別モード(辞書)の場合、当該ファイル用のROIを取得
+            current_roi_data = None
+            if isinstance(roi_data_src, dict) and 'type' not in roi_data_src:
+                # {path: roi_data} の形式とみなす
+                current_roi_data = roi_data_src.get(fpath)
+            else:
+                # 共通ROIデータそのもの
+                current_roi_data = roi_data_src
+
+            # ROI適用
+            if current_roi_data and current_roi_data.get('type') == 'poly':
+                # ポリゴンマスク生成
+                verts = current_roi_data['data']
+                y, x = np.mgrid[:H, :W]
+                points = np.vstack((x.ravel(), y.ravel())).T
+                path = Path(verts)
+                self.roi_mask = path.contains_points(points).reshape(H, W)
+                
+                # BBox設定
+                xs = [v[0] for v in verts]; ys = [v[1] for v in verts]
+                x1, x2 = int(min(xs)), int(max(xs))
+                y1, y2 = int(min(ys)), int(max(ys))
+                self.roi_coords = (x1, y1, x2-x1, y2-y1)
+                
+            elif current_roi_data and current_roi_data.get('type') == 'rect':
+                # 矩形
+                self.roi_mask = None
+                rx, ry, rw, rh = current_roi_data['data']
+                if rx+rw <= W and ry+rh <= H:
+                    self.roi_coords = (rx, ry, rw, rh)
+                else:
+                    self.set_full_roi(show_visuals=False)
+            else:
+                self.set_full_roi(show_visuals=False)
             
             self.update_processing_and_acf()
             self.start_heatmap_thread_batch(p)
         except Exception as e:
             print(f"Skipping {fname}: {e}")
             self.batch_index += 1; self.root.after(100, self.process_batch_next)
+
 
     def start_heatmap_thread_batch(self, p):
         self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Batch Analyzing...")
