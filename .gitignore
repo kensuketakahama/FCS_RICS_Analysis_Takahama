@@ -16,6 +16,7 @@ Desktop.ini
 # --- Environments (もしvenvなどを使っている場合) ---
 .env
 .venv
+.spec
 env/
 venv/
 ENV/
