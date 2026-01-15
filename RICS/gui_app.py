@@ -50,7 +50,7 @@ class BatchConfigWindow(tk.Toplevel):
     def __init__(self, master, file_list, root_dir, execute_callback):
         super().__init__(master)
         self.title(f"Batch Processing Config - {len(file_list)} files found")
-        self.geometry("1200x800")
+        self.geometry("1200x850")
         self.file_list = file_list
         self.root_dir = root_dir
         self.execute_callback = execute_callback
@@ -58,6 +58,7 @@ class BatchConfigWindow(tk.Toplevel):
         self.current_preview_data = None
         self.roi_coords = (0, 0, 0, 0)
         
+        # UI Variables
         self.ma_win = tk.IntVar(value=cfg.MOVING_AVG_WINDOW)
         self.px_size = tk.DoubleVar(value=getattr(cfg, 'PIXEL_SIZE', 0.05) * 1000.0)
         self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
@@ -76,6 +77,7 @@ class BatchConfigWindow(tk.Toplevel):
         self.range_x = tk.IntVar(value=16)
         self.range_y = tk.IntVar(value=16)
         self.auto_range = tk.BooleanVar(value=False)
+        self.mask_outside = tk.BooleanVar(value=False)
         
         self.hm_autoscale = tk.BooleanVar(value=True)
         self.hm_percentile = tk.DoubleVar(value=95.0)
@@ -146,6 +148,7 @@ class BatchConfigWindow(tk.Toplevel):
         self._add_entry(h_grp, "Range X (px):", self.range_x)
         self._add_entry(h_grp, "Range Y (px):", self.range_y)
         ttk.Checkbutton(h_grp, text="Auto-Detect Range", variable=self.auto_range).pack(anchor="w")
+        ttk.Checkbutton(h_grp, text="Mask Outside ROI (Mean Fill)", variable=self.mask_outside).pack(anchor="w")
         
         o_grp = ttk.LabelFrame(right_frame, text="4. Output Settings")
         o_grp.pack(fill=tk.X, pady=5)
@@ -202,7 +205,12 @@ class BatchConfigWindow(tk.Toplevel):
             'scan_params': {'pixel_size': self.px_size.get() * 1e-3, 'pixel_dwell': self.px_dwell.get() * 1e-6, 'line_time': self.line_time.get() * 1e-3},
             'fit_params': {"D": self.fit_D.get(), "G0": self.fit_G0.get(), "w0": self.fit_w0.get(), "wz": self.fit_wz.get()},
             'fixed_params': {"w0": self.fix_w0.get(), "wz": self.fix_wz.get(), "D": False, "G0": False},
-            'heatmap': {'win': self.hm_win.get(), 'step': self.hm_step.get(), 'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(), 'auto_range': self.auto_range.get()},
+            'heatmap': {
+                'win': self.hm_win.get(), 'step': self.hm_step.get(),
+                'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
+                'auto_range': self.auto_range.get(),
+                'mask': self.mask_outside.get()
+            },
             'roi': self.roi_coords,
             'output': {'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(), 'max': self.hm_max.get(), 'interp': self.hm_interp.get()}
         }
@@ -275,7 +283,9 @@ class ROIAnalysisWindow(tk.Toplevel):
 
     def reset_all(self):
         self.ref_image = None; self.diff_map = None; self.roi_verts = None
-        if self.poly_selector: self.poly_selector.disconnect(); self.poly_selector = None
+        if self.poly_selector:
+            self.poly_selector.set_active(False)
+            self.poly_selector = None
         self.lbl_result.config(text="Result: ---")
         self.btn_draw.config(state="disabled"); self.btn_calc.config(state="disabled")
         self.ax.cla(); self.canvas.draw()
@@ -333,7 +343,7 @@ class ROIAnalysisWindow(tk.Toplevel):
         self.canvas.draw()
 
     def start_drawing(self):
-        if self.poly_selector: self.poly_selector.disconnect()
+        if self.poly_selector: self.poly_selector.set_active(False)
         self.lbl_result.config(text="Drawing... Click points, click start to finish.")
         def on_select(verts):
             self.roi_verts = verts; self.refresh_plot()
@@ -368,7 +378,7 @@ class ROIAnalysisWindow(tk.Toplevel):
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v23.1 (Complete)")
+        self.root.title("RICS Analysis App v23.7 (Fixed ROI Logic)")
         self.root.geometry("1400x1000")
 
         setup_dock_icon(self.root)
@@ -379,6 +389,10 @@ class RICSApp:
         self.roi_data = None
         self.acf_data = None
         self.current_file_path = None
+        
+        self.roi_mask = None 
+        self.roi_mode = "rect" # "rect" or "poly"
+        self.show_roi_rect = True # ★ Flag to control Rect display (False on Reset)
         
         # Display settings
         self.current_frame_idx = -1
@@ -419,6 +433,7 @@ class RICSApp:
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.auto_range_var = tk.BooleanVar(value=False)
+        self.mask_outside_var = tk.BooleanVar(value=False) # New
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
         self.hm_autoscale_var = tk.BooleanVar(value=True)
@@ -434,6 +449,7 @@ class RICSApp:
         self.drag_lines = {}
         self.dragging_item = None
         self.selector = None
+        self.poly_selector = None
         self.press_xy = None
 
         self.create_layout()
@@ -492,9 +508,15 @@ class RICSApp:
         bg_frame = ttk.Frame(parent); bg_frame.pack(fill=tk.X, pady=2)
         ttk.Label(bg_frame, text="Mov.Avg:").pack(side=tk.LEFT); ttk.Entry(bg_frame, textvariable=self.ma_window_var, width=5).pack(side=tk.LEFT)
         roi_grp = ttk.LabelFrame(parent, text="ROI Config"); roi_grp.pack(fill=tk.X, pady=5)
-        ttk.Button(roi_grp, text="Select Full Image", command=self.set_full_roi).pack(fill=tk.X, pady=2)
+        ttk.Button(roi_grp, text="Select Full Image", command=lambda: self.set_full_roi(show_visuals=True)).pack(fill=tk.X, pady=2)
+        roi_btns = ttk.Frame(roi_grp); roi_btns.pack(fill=tk.X, pady=2)
+        ttk.Button(roi_btns, text="Rect ROI", command=self.use_rect_roi, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(roi_btns, text="Draw Poly", command=self.use_poly_roi, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(roi_btns, text="Reset", command=self.reset_roi, width=8).pack(side=tk.LEFT, padx=2)
+        
         self._add_roi_entry(roi_grp, "Size W:", self.roi_w_var, " H:", self.roi_h_var)
         self._add_roi_entry(roi_grp, "Center X:", self.roi_cx_var, " Y:", self.roi_cy_var)
+        ttk.Checkbutton(roi_grp, text="Mask Outside ROI (Mean Fill)", variable=self.mask_outside_var).pack(anchor="w", padx=5)
         ttk.Button(parent, text="Update Image & ACF", command=self.update_processing_and_acf).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
@@ -537,11 +559,20 @@ class RICSApp:
         vis_grp = ttk.LabelFrame(parent, text="Display"); vis_grp.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(vis_grp, text="Auto Scale", variable=self.hm_autoscale_var).pack(side=tk.LEFT)
         ttk.Entry(vis_grp, textvariable=self.hm_percentile_var, width=5).pack(side=tk.LEFT); ttk.Label(vis_grp, text="%").pack(side=tk.LEFT)
+        
+        ttk.Label(vis_grp, text=" | Max D:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(vis_grp, textvariable=self.hm_max_val_var, width=5).pack(side=tk.LEFT)
+        
         self.progress_bar = ttk.Progressbar(parent, variable=self.progress_val, maximum=100); self.progress_bar.pack(fill=tk.X, pady=5)
         ttk.Label(parent, textvariable=self.heatmap_status, font=("Arial", 9)).pack(anchor="w")
+        
         hm_btns = ttk.Frame(parent); hm_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hm_btns, text="Gen Heatmap", command=self.start_heatmap_thread).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(hm_btns, text="Stop", command=self.stop_heatmap).pack(side=tk.LEFT)
+        
+        # ★ 追加: Regen View (計算済みデータの再描画)
+        ttk.Button(hm_btns, text="Regen View", command=self.plot_heatmap_result).pack(side=tk.LEFT, padx=5)
+        
         ttk.Button(parent, text="Save Heatmap", command=self.save_heatmap_image).pack(fill=tk.X, pady=5)
 
     def _add_entry(self, p, l, v):
@@ -561,8 +592,94 @@ class RICSApp:
         self.canvas_fig.mpl_connect('button_press_event', self.on_click)
         self.canvas_fig.mpl_connect('motion_notify_event', self.on_motion)
         self.canvas_fig.mpl_connect('button_release_event', self.on_release)
+        # Default Rect
         self.selector = RectangleSelector(self.ax_img, self.on_select_roi, useblit=True, button=[1], minspanx=5, minspany=5, spancoords='pixels', interactive=True, props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True))
         self.selector.set_active(False)
+
+    def reset_roi(self):
+        """★ Reset all ROI selections and hide visual frame"""
+        self.roi_mode = "rect"
+        self.roi_mask = None
+        
+        # ポリゴンセレクターの無効化
+        if self.poly_selector:
+            self.poly_selector.set_active(False)
+            self.poly_selector = None
+        
+        # 矩形セレクターの完全無効化と非表示
+        if self.selector:
+            self.selector.set_active(False)
+            self.selector.set_visible(False) # ★重要: 画面から消す
+            # 描画アーティファクトが残る場合があるので、念のためartistsも非表示に
+            try:
+                for artist in self.selector.artists:
+                    artist.set_visible(False)
+            except:
+                pass
+
+        self.result_text.set("ROI Selection Reset (Full Image)")
+        # Full image, Visuals OFF
+        self.set_full_roi(show_visuals=False)
+
+    def use_rect_roi(self):
+        if self.poly_selector:
+            self.poly_selector.set_active(False)
+            self.poly_selector = None
+        self.roi_mode = "rect"
+        self.roi_mask = None 
+        self.show_roi_rect = True 
+        
+        if self.selector:
+            self.selector.set_active(True)
+            self.selector.set_visible(True) # ★重要: 再表示する
+        
+        self.result_text.set("Switched to Rectangular ROI.")
+        self.plot_results()
+
+    def use_poly_roi(self):
+        # 1. 長方形セレクターを無効化
+        if self.selector:
+            self.selector.set_active(False)
+        
+        # 2. 変数設定
+        self.roi_mode = "poly"
+        self.roi_mask = None
+        self.show_roi_rect = False # 枠線表示OFF
+        
+        # 3. 古いポリゴンセレクターがあれば破棄
+        if self.poly_selector:
+            self.poly_selector.set_active(False)
+            self.poly_selector = None
+        
+        # 4. ★重要★ 先に画面をクリアして、古いROI表示（長方形など）を消す
+        # これを後にすると、せっかく作ったPolygonSelectorがcla()で消されてしまう
+        self.plot_results()
+        
+        # 5. コールバック定義
+        def on_poly(verts):
+            if self.raw_stack is None: return
+            _, H, W = self.raw_stack.shape
+            y, x = np.mgrid[:H, :W]
+            points = np.vstack((x.ravel(), y.ravel())).T
+            path = Path(verts)
+            mask = path.contains_points(points).reshape(H, W)
+            self.roi_mask = mask
+            
+            # Update BBox
+            xs = [v[0] for v in verts]; ys = [v[1] for v in verts]
+            x1, x2 = int(min(xs)), int(max(xs))
+            y1, y2 = int(min(ys)), int(max(ys))
+            w = x2 - x1; h = y2 - y1
+            cx = x1 + w // 2; cy = y1 + h // 2
+            self.roi_w_var.set(w); self.roi_h_var.set(h)
+            self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
+            
+            # 計算更新（plot_resultsが呼ばれ、contourが描画される）
+            self.update_processing_and_acf()
+            
+        # 6. 新しいポリゴンセレクターを作成（クリア済みの画面にアタッチ）
+        self.poly_selector = PolygonSelector(self.ax_img, on_poly, props=dict(color='cyan', linewidth=2, alpha=0.5))
+        self.result_text.set("Draw Polygon on Image...")
 
     def on_click(self, event):
         if event.inaxes in [self.ax_x, self.ax_y]:
@@ -590,12 +707,16 @@ class RICSApp:
     def on_release(self, event):
         if self.dragging_item: self.dragging_item = None; return
         if event.inaxes == self.ax_img and self.press_xy:
+            if self.roi_mode == "poly": return
+            
             rx = (event.xdata, event.ydata)
-            if rx[0] and math.sqrt((rx[0]-self.press_xy[0])**2 + (rx[1]-self.press_xy[1])**2) < 5:
+            # Only update center if simple click (and Rect mode)
+            if self.roi_mask is None and rx[0] and math.sqrt((rx[0]-self.press_xy[0])**2 + (rx[1]-self.press_xy[1])**2) < 5:
                 self.roi_cx_var.set(int(rx[0])); self.roi_cy_var.set(int(rx[1]))
                 self.update_processing_and_acf()
 
     def on_select_roi(self, eclick, erelease):
+        self.roi_mask = None 
         x1, y1 = int(eclick.xdata), int(eclick.ydata); x2, y2 = int(erelease.xdata), int(erelease.ydata)
         w = abs(x2-x1); h = abs(y2-y1); cx = min(x1,x2)+w//2; cy = min(y1,y2)+h//2
         self.roi_w_var.set(w); self.roi_h_var.set(h); self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
@@ -612,10 +733,13 @@ class RICSApp:
             self.canvas_fig.draw_idle()
         except: pass
 
-    def set_full_roi(self):
+    def set_full_roi(self, show_visuals=True):
+        """Reset ROI to full image dimensions."""
         if self.raw_stack is not None:
             _, H, W = self.raw_stack.shape
             self.roi_w_var.set(W); self.roi_h_var.set(H); self.roi_cx_var.set(W//2); self.roi_cy_var.set(H//2)
+            self.roi_mask = None 
+            self.show_roi_rect = show_visuals # ★ Control visual flag
             self.update_processing_and_acf()
 
     def on_slider_change(self, val): self.current_frame_idx = int(val); self.update_processing_and_acf()
@@ -666,7 +790,7 @@ class RICSApp:
             if rx+rw <= W and ry+rh <= H:
                 self.roi_w_var.set(rw); self.roi_h_var.set(rh)
                 self.roi_cx_var.set(rx + rw//2); self.roi_cy_var.set(ry + rh//2)
-            else: self.set_full_roi()
+            else: self.set_full_roi(show_visuals=True)
             
             self.update_processing_and_acf()
             self.start_heatmap_thread_batch(p)
@@ -683,7 +807,7 @@ class RICSApp:
             args=(self.processed_full, roi, win, step, 
                   p['fit_params'], p['fixed_params'], 
                   p['heatmap']['omit'], p['heatmap']['rx'], p['heatmap']['ry'], 
-                  p['heatmap']['auto_range'], p['scan_params'])
+                  p['heatmap']['auto_range'], p['scan_params'], p['heatmap']['mask'], None) # Batch uses rect only
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
@@ -692,8 +816,14 @@ class RICSApp:
         if self.heatmap_d_map is None: return
         p = self.batch_params['output']
         base_path = os.path.splitext(self.current_file_path)[0]
-        save_path = base_path + "_heatmap.png"
-        csv_path = base_path + "_heatmap_data.csv"
+        
+        # ★修正: 連番チェックを入れる
+        save_path = self._get_unique_filepath(base_path + "_heatmap.png")
+        # CSVはPNGと同じベース名に合わせるか、独自に連番を振る
+        csv_base = os.path.splitext(save_path)[0] 
+        csv_path = csv_base + ".csv"
+        # 万が一CSVだけ残っているケースも考慮するなら以下を使用
+        # csv_path = self._get_unique_filepath(base_path + "_heatmap_data.csv")
         
         ma_val = self.batch_params['mov_avg']
         win_val = self.batch_params['heatmap']['win']
@@ -704,6 +834,7 @@ class RICSApp:
             fig_temp = plt.figure(figsize=(6, 6))
             ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
             display_map = self.heatmap_d_map.copy()
+            # (描画処理省略...既存コードと同じ)
             valid = display_map[~np.isnan(display_map)]
             vmin, vmax = None, None
             if len(valid) > 0:
@@ -713,6 +844,7 @@ class RICSApp:
             ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
             fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
             fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
+            
             fig_temp.savefig(save_path, dpi=300); plt.close(fig_temp)
             np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
             print(f"Saved: {save_path} & {csv_path}")
@@ -743,6 +875,7 @@ class RICSApp:
             self.current_file_path = filepath
             if not self.is_batch_running:
                 self.roi_cx_var.set(W // 2); self.roi_cy_var.set(H // 2)
+            self.roi_mask = None # Reset
             self.selector.set_active(True)
             self.update_processing_and_acf()
         except Exception as e: messagebox.showerror("Error", str(e))
@@ -752,13 +885,50 @@ class RICSApp:
         try:
             win = max(1, self.ma_window_var.get())
             self.processed_full = prep.subtract_moving_average(self.raw_stack, win)
+            
             roi_w = self.roi_w_var.get(); roi_h = self.roi_h_var.get()
             cx = self.roi_cx_var.get(); cy = self.roi_cy_var.get()
             _, H, W = self.processed_full.shape
-            x_start = max(0, cx - roi_w // 2); x_end = min(W, cx + roi_w // 2)
-            y_start = max(0, cy - roi_h // 2); y_end = min(H, cy + roi_h // 2)
-            if (x_end-x_start)<2 or (y_end-y_start)<2: return
-            self.roi_data = self.processed_full[:, y_start:y_end, x_start:x_end]
+            
+            x_start = cx - roi_w // 2; x_end = x_start + roi_w
+            y_start = cy - roi_h // 2; y_end = y_start + roi_h
+            
+            # Prepare Mask Logic for Single Fit
+            use_mask = self.mask_outside_var.get()
+            
+            # Clip bounds
+            vx1 = max(0, x_start); vx2 = min(W, x_end)
+            vy1 = max(0, y_start); vy2 = min(H, y_end)
+            
+            if vx2 > vx1 and vy2 > vy1:
+                # Base valid extraction
+                base_crop = self.processed_full[:, vy1:vy2, vx1:vx2]
+                
+                if use_mask:
+                    # Create container filled with mean
+                    mean_val = np.mean(base_crop)
+                    self.roi_data = np.full((self.total_frames, roi_h, roi_w), mean_val, dtype=base_crop.dtype)
+                    
+                    # Place valid rect
+                    oy = vy1 - y_start; ox = vx1 - x_start
+                    
+                    # If Polygon Mask exists, modify base_crop before placing
+                    if self.roi_mask is not None:
+                        # Extract mask crop
+                        mask_crop = self.roi_mask[vy1:vy2, vx1:vx2]
+                        # Apply to data: False -> mean_val
+                        # Note: This affects base_crop reference, so copy if needed
+                        masked_data = base_crop.copy()
+                        masked_data[:, ~mask_crop] = mean_val
+                        self.roi_data[:, oy:oy+(vy2-vy1), ox:ox+(vx2-vx1)] = masked_data
+                    else:
+                        self.roi_data[:, oy:oy+(vy2-vy1), ox:ox+(vx2-vx1)] = base_crop
+                else:
+                    # Normal: Just use valid intersection (size might differ from roi_w/h if at border)
+                    self.roi_data = base_crop
+            else:
+                self.roi_data = np.zeros((self.total_frames, roi_h, roi_w))
+
             self.roi_coords = (x_start, y_start, x_end - x_start, y_end - y_start)
             self.acf_data = calc.calculate_2d_acf(self.roi_data)
             self.plot_results(fit_data=None)
@@ -814,31 +984,83 @@ class RICSApp:
         sp = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
         self.stop_event.clear(); self.progress_val.set(0)
         with self.live_fit_lock: self.live_fit_data = None
+        
+        # Check mask setting
+        use_mask = self.mask_outside_var.get()
+        roi_mask_data = self.roi_mask if use_mask else None
+        
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
             args=(self.processed_full, self.roi_coords, self.hm_window_var.get(), self.hm_step_var.get(),
                   fp, fx, self.omit_radius_var.get(), self.fit_range_x_var.get(), self.fit_range_y_var.get(),
-                  self.auto_range_var.get(), sp)
+                  self.auto_range_var.get(), sp, use_mask, roi_mask_data)
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p):
+    def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p, use_mask, poly_mask):
         T, H, W = data.shape
         d_map = np.full((H, W), np.nan)
         roi_x, roi_y, roi_w, roi_h = roi
         frees = [k for k, v in fixed_p.items() if not v]
         p0 = [fit_p[k] for k in frees]
+        half_w = win // 2 
+        
         for y in range(roi_y, roi_y+roi_h, step):
             if self.stop_event.is_set(): break
             prog = ((y - roi_y) / roi_h) * 100
             self.progress_val.set(prog)
             for x in range(roi_x, roi_x+roi_w, step):
-                y1, y2 = max(0, y-win//2), min(H, y+win//2)
-                x1, x2 = max(0, x-win//2), min(W, x+win//2)
-                if (y2-y1)<4 or (x2-x1)<4: continue
+                
+                # ★ Center Check: If poly_mask is used, skip if center is False
+                if poly_mask is not None:
+                    # Boundary check for center
+                    if 0 <= y < H and 0 <= x < W:
+                        if not poly_mask[y, x]:
+                            continue
+                
+                # Window Coords
+                y1 = y - half_w; y2 = y + half_w
+                x1 = x - half_w; x2 = x + half_w
+                
+                # Check bounds
+                if not use_mask:
+                    # Clip if mask OFF
+                    y1 = max(0, y1); y2 = min(H, y2)
+                    x1 = max(0, x1); x2 = min(W, x2)
+                    if (y2-y1)<4 or (x2-x1)<4: continue
+                    roi_img = data[:, y1:y2, x1:x2]
+                else:
+                    # Mask ON (Mean Fill)
+                    valid_y1 = max(roi_y, y1); valid_y2 = min(roi_y+roi_h, y2)
+                    valid_x1 = max(roi_x, x1); valid_x2 = min(roi_x+roi_w, x2)
+                    
+                    valid_y1 = max(0, valid_y1); valid_y2 = min(H, valid_y2)
+                    valid_x1 = max(0, valid_x1); valid_x2 = min(W, valid_x2)
+                    
+                    if valid_y2 <= valid_y1 or valid_x2 <= valid_x1: continue
+                        
+                    valid_data = data[:, valid_y1:valid_y2, valid_x1:valid_x2]
+                    mean_val = np.mean(valid_data)
+                    
+                    # Create window filled with mean
+                    win_h_sz = 2 * half_w; win_w_sz = 2 * half_w
+                    roi_img = np.full((T, win_h_sz, win_w_sz), mean_val, dtype=data.dtype)
+                    
+                    off_y = valid_y1 - y1; off_x = valid_x1 - x1
+                    cpy_h = valid_y2 - valid_y1; cpy_w = valid_x2 - valid_x1
+                    
+                    if poly_mask is not None:
+                        # Extract mask for valid region
+                        m_sub = poly_mask[valid_y1:valid_y2, valid_x1:valid_x2]
+                        masked_vdata = valid_data.copy()
+                        masked_vdata[:, ~m_sub] = mean_val
+                        roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = masked_vdata
+                    else:
+                        roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = valid_data
+
                 try:
-                    acf = calc.calculate_2d_acf(data[:, y1:y2, x1:x2])
+                    acf = calc.calculate_2d_acf(roi_img)
                     sh, sw = acf.shape; scy, scx = sh//2, sw//2
                     sx = np.arange(-scx, scx+(1 if sw%2 else 0))[:sw]
                     sy = np.arange(-scy, scy+(1 if sh%2 else 0))[:sh]
@@ -918,6 +1140,7 @@ class RICSApp:
         if self.is_batch_running: self.batch_stop_req = True
 
     def plot_heatmap_result(self):
+        # (前半の描画処理は変更なし)
         if self.heatmap_d_map is None: return
         if self.hm_window is None or not tk.Toplevel.winfo_exists(self.hm_window):
             self.hm_window = tk.Toplevel(self.root)
@@ -928,10 +1151,16 @@ class RICSApp:
             toolbar = NavigationToolbar2Tk(self.hm_canvas, self.hm_window); toolbar.update()
             self.hm_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         else: self.hm_window.lift()
+        
         self.hm_fig.clf(); self.hm_ax = self.hm_fig.add_subplot(111)
+        # ... (中略: imshowなどの描画コード) ...
         display_map = self.heatmap_d_map.copy()
         valid_mask = ~np.isnan(display_map)
-        if not np.any(valid_mask): self.hm_ax.text(0.5, 0.5, "No valid fitting results.", ha='center', va='center'); self.hm_canvas.draw(); return
+        if not np.any(valid_mask): 
+            self.hm_ax.text(0.5, 0.5, "No valid fitting results.", ha='center', va='center')
+            self.hm_canvas.draw()
+            return
+            
         vmin, vmax = None, None
         if self.hm_autoscale_var.get():
             valid_data = display_map[valid_mask]
@@ -943,17 +1172,22 @@ class RICSApp:
         else:
             valid_data = display_map[valid_mask]
             if len(valid_data) > 0: vmin = np.nanmin(valid_data); vmax = self.hm_max_val_var.get()
+            
         if vmin is not None and vmax is not None:
             if vmin > vmax: vmin, vmax = vmax, vmin
             if vmin == vmax: vmax = vmin + 1e-9
+            
         interp = self.hm_interp_var.get()
         im = self.hm_ax.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
         self.hm_ax.set_title(f"Diffusion Map (Interp: {interp})")
         self.hm_cbar = self.hm_fig.colorbar(im, ax=self.hm_ax, label="D (um^2/s)")
         
+        # ★修正: CSV自動保存時の上書き防止
         if self.current_file_path:
             base = os.path.splitext(self.current_file_path)[0]
-            try: np.savetxt(base + "_heatmap_data.csv", self.heatmap_d_map, delimiter=',')
+            # ここでユニークパスを取得
+            csv_path = self._get_unique_filepath(base + "_heatmap_data.csv")
+            try: np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
             except: pass
             
         tk.Button(self.hm_window, text="Draw Freehand ROI & Calc Mean", command=self.open_roi_tool).pack(pady=5)
@@ -970,20 +1204,20 @@ class RICSApp:
 
         if filepath:
             try:
+                # (画像の保存処理はそのまま)
                 fig_temp = plt.figure(figsize=(6, 6))
                 ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
                 display_map = self.heatmap_d_map.copy()
+                # ... (中略: imshow等) ...
                 vmin, vmax = None, None
                 if self.hm_autoscale_var.get():
                     valid = display_map[~np.isnan(display_map)]
                     if len(valid) > 0:
-                        vmin = np.nanmin(valid)
-                        try: perc_val = self.hm_percentile_var.get()
-                        except: perc_val = 95.0
-                        vmax = np.nanpercentile(valid, perc_val)
+                        vmin = np.nanmin(valid); vmax = np.nanpercentile(valid, self.hm_percentile_var.get())
                 else:
                     valid = display_map[~np.isnan(display_map)]
                     if len(valid) > 0: vmin = np.nanmin(valid); vmax = self.hm_max_val_var.get()
+                
                 interp = self.hm_interp_var.get()
                 im = ax_temp.imshow(display_map, cmap='jet', interpolation=interp, vmin=vmin, vmax=vmax)
                 ax_temp.set_title("Diffusion Map")
@@ -991,10 +1225,14 @@ class RICSApp:
                 fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
                 fig_temp.savefig(filepath, dpi=300); plt.close(fig_temp)
                 
-                csv_path = os.path.splitext(filepath)[0] + ".csv"
+                # ★修正: CSV保存時の上書き防止
+                # 画像のパスに基づいてCSV名を作るが、それが既存なら連番を振る
+                csv_base_path = os.path.splitext(filepath)[0] + ".csv"
+                csv_path = self._get_unique_filepath(csv_base_path)
+                
                 np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
                 
-                messagebox.showinfo("Success", f"Saved PNG & CSV:\n{filepath}")
+                messagebox.showinfo("Success", f"Saved PNG:\n{filepath}\n\nSaved CSV:\n{csv_path}")
             except Exception as e: messagebox.showerror("Error", str(e))
 
     def save_graphs(self):
@@ -1003,6 +1241,18 @@ class RICSApp:
         if filepath:
             try: self.fig.savefig(filepath, dpi=300, format='jpg'); messagebox.showinfo("OK", f"Saved: {filepath}")
             except Exception as e: messagebox.showerror("Error", str(e))
+
+    def _get_unique_filepath(self, filepath):
+        """同名ファイルがある場合、末尾に連番を付与して重複しないパスを返す"""
+        if not os.path.exists(filepath):
+            return filepath
+        base, ext = os.path.splitext(filepath)
+        counter = 1
+        while True:
+            new_path = f"{base}_{counter}{ext}"
+            if not os.path.exists(new_path):
+                return new_path
+            counter += 1
 
     def plot_results(self, fit_data=None):
         self.ax_img.cla(); self.ax_x.cla(); self.ax_y.cla(); self.ax_3d.cla()
@@ -1013,14 +1263,23 @@ class RICSApp:
         self.ax_img.imshow(display_img, cmap='gray')
         self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
-        x, y, w, h = self.roi_coords
-        rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
-        self.ax_img.add_patch(rect)
+        
+        # ★ Draw ROI based on mode
+        if self.roi_mask is not None:
+            # Poly mode: draw contour
+            self.ax_img.contour(self.roi_mask, colors='r', linewidths=2)
+        else:
+            # Rect mode
+            x, y, w, h = self.roi_coords
+            # Check if visual flag is True
+            if self.show_roi_rect:
+                rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
+                self.ax_img.add_patch(rect)
+
         H, W = self.acf_data.shape; cy, cx = H // 2, W // 2
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]; y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
         omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        
         def plot_slice(ax, axis_vals, data_vals, fit_vals, title, fit_limit, line_prefix):
             dvals = np.abs(axis_vals)
             mask_omit_arr = (dvals <= omit_r) if omit_r > 0 else np.zeros_like(dvals, dtype=bool)
@@ -1042,7 +1301,7 @@ class RICSApp:
         self.ax_3d.plot_surface(X_grid, Y_grid, self.acf_data, cmap='viridis', alpha=0.8)
         if fit_data is not None: self.ax_3d.plot_wireframe(X_grid, Y_grid, fit_data, color='red', alpha=0.5, rcount=10, ccount=10)
         mask_3d = (X_grid**2 + Y_grid**2) > (omit_r**2) if omit_r>0 else True
-        vz = self.acf_data[mask_3d]; 
+        vz = self.acf_data[mask_3d]
         if len(vz)>0: self.ax_3d.set_zlim(np.min(vz), np.max(vz))
         self.canvas_fig.draw()
 
