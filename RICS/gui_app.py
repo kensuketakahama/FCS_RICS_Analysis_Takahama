@@ -1,3 +1,6 @@
+import gc
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -1247,8 +1250,9 @@ class RICSApp:
     def save_batch_result(self):
         if self.heatmap_d_map is None: return
         p = self.batch_params['output']
-        base_path = os.path.splitext(self.current_file_path)[0]
         
+        # 保存パスの生成
+        base_path = os.path.splitext(self.current_file_path)[0]
         save_path = self._get_unique_filepath(base_path + "_heatmap.png")
         csv_base = os.path.splitext(save_path)[0] 
         csv_path = csv_base + ".csv"
@@ -1259,23 +1263,44 @@ class RICSApp:
         info_text = f"Mov.Avg: {ma_val} | Win: {win_val} | Step: {step_val}"
 
         try:
-            fig_temp = plt.figure(figsize=(6, 6))
+            # ★ 修正: plt.figure() を使わず、Figureクラスを直接使用（メモリリーク防止）
+            fig_temp = Figure(figsize=(6, 6), dpi=300)
+            canvas = FigureCanvasAgg(fig_temp) # バックエンドを明示
             ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
+            
             display_map = self.heatmap_d_map.copy()
             valid = display_map[~np.isnan(display_map)]
             vmin, vmax = None, None
+            
             if len(valid) > 0:
-                if p['auto']: vmin = np.nanmin(valid); vmax = np.nanpercentile(valid, p['perc'])
-                else: vmin = np.nanmin(valid); vmax = p['max']
+                if p['auto']: 
+                    vmin = np.nanmin(valid)
+                    try: vmax = np.nanpercentile(valid, p['perc'])
+                    except: vmax = np.nanmax(valid)
+                else: 
+                    vmin = np.nanmin(valid)
+                    vmax = p['max']
+            
             im = ax_temp.imshow(display_map, cmap='jet', interpolation=p['interp'], vmin=vmin, vmax=vmax)
             ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
             fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
             fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
             
-            fig_temp.savefig(save_path, dpi=300); plt.close(fig_temp)
+            # 保存
+            fig_temp.savefig(save_path, dpi=300)
+            
+            # CSV保存
             np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
             print(f"Saved: {save_path} & {csv_path}")
-        except Exception as e: print(f"Save Error: {e}")
+            
+            # ★ 明示的なメモリ解放
+            fig_temp.clf()
+            del fig_temp
+            del canvas
+            del display_map
+            
+        except Exception as e:
+            print(f"Save Error: {e}")
 
     # =======================================================
     # Main Logic
@@ -1543,12 +1568,23 @@ class RICSApp:
                 if self.live_fit_data:
                     self.update_live_plot(self.live_fit_data); self.live_fit_data = None
         except Exception: pass
+        
         if self.heatmap_thread.is_alive():
             self.root.after(100, self.monitor_heatmap_thread)
         else:
             self.progress_val.set(100)
             if self.is_batch_running:
-                self.save_batch_result(); self.batch_index += 1; self.root.after(200, self.process_batch_next)
+                self.save_batch_result()
+                
+                # ★ 追加: 次のファイルへ行く前にメモリを強制解放
+                self.processed_full = None
+                self.raw_stack = None
+                self.roi_data = None
+                self.heatmap_d_map = None
+                gc.collect()
+                
+                self.batch_index += 1
+                self.root.after(200, self.process_batch_next)
             else:
                 self.heatmap_status.set("Completed."); self.plot_heatmap_result()
 
