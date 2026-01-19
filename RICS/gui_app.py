@@ -488,8 +488,8 @@ class BatchConfigWindow(tk.Toplevel):
 class ROIAnalysisWindow(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
-        self.title("Freehand ROI Analysis Tool")
-        self.geometry("1100x850")
+        self.title("Freehand ROI & Histogram Tool")
+        self.geometry("1200x900")
         
         self.ref_image = None
         self.diff_map = None
@@ -501,28 +501,61 @@ class ROIAnalysisWindow(tk.Toplevel):
         self.disp_max = tk.DoubleVar(value=50.0)
         self.view_mode = tk.StringVar(value="heatmap")
         
+        # ヒストグラム用設定変数
+        self.hist_bins = tk.IntVar(value=50)
+        self.hist_use_range = tk.BooleanVar(value=False)
+        self.hist_min = tk.DoubleVar(value=0.0)
+        self.hist_max = tk.DoubleVar(value=100.0)
+        
         self.create_widgets()
 
     def create_widgets(self):
+        # --- Top Control Frame ---
         frame_top = ttk.Frame(self); frame_top.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(frame_top, text="Load Reference Image", command=self.load_ref_image).pack(side=tk.LEFT, padx=5)
         ttk.Button(frame_top, text="Load Diffusion CSV", command=self.load_diff_data).pack(side=tk.LEFT, padx=5)
+        
+        # View Mode Selection (Bothを追加)
         ttk.Label(frame_top, text="View Mode:").pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(frame_top, text="Heatmap", variable=self.view_mode, value="heatmap", command=self.refresh_plot).pack(side=tk.LEFT)
         ttk.Radiobutton(frame_top, text="Reference Image", variable=self.view_mode, value="reference", command=self.refresh_plot).pack(side=tk.LEFT)
+        ttk.Radiobutton(frame_top, text="Both", variable=self.view_mode, value="both", command=self.refresh_plot).pack(side=tk.LEFT)
         
+        # --- Histogram & Batch Frame ---
+        frame_hist = ttk.LabelFrame(self, text="Histogram & Batch Analysis"); frame_hist.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Row 1: Settings
+        h_conf = ttk.Frame(frame_hist); h_conf.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(h_conf, text="Bins:").pack(side=tk.LEFT)
+        ttk.Entry(h_conf, textvariable=self.hist_bins, width=5).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Checkbutton(h_conf, text="Limit Range (Threshold)", variable=self.hist_use_range).pack(side=tk.LEFT, padx=10)
+        ttk.Label(h_conf, text="Min:").pack(side=tk.LEFT)
+        ttk.Entry(h_conf, textvariable=self.hist_min, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Label(h_conf, text="Max:").pack(side=tk.LEFT)
+        ttk.Entry(h_conf, textvariable=self.hist_max, width=8).pack(side=tk.LEFT, padx=2)
+
+        # Row 2: Buttons
+        h_btns = ttk.Frame(frame_hist); h_btns.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Button(h_btns, text="Show Histogram (Current)", command=self.show_current_histogram).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(h_btns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(h_btns, text="Run Batch Histograms (Select Dir)", command=self.run_batch_histogram).pack(side=tk.LEFT, padx=5)
+        
+        # --- Display Settings ---
         frame_conf = ttk.LabelFrame(self, text="Display Settings"); frame_conf.pack(fill=tk.X, padx=10, pady=5)
         ttk.Checkbutton(frame_conf, text="Auto Scale (%)", variable=self.disp_auto).pack(side=tk.LEFT, padx=5)
         ttk.Entry(frame_conf, textvariable=self.disp_perc, width=5).pack(side=tk.LEFT); ttk.Label(frame_conf, text="%").pack(side=tk.LEFT)
         ttk.Label(frame_conf, text=" | Max D:").pack(side=tk.LEFT, padx=10)
         ttk.Entry(frame_conf, textvariable=self.disp_max, width=5).pack(side=tk.LEFT)
-        ttk.Button(frame_conf, text="Update Heatmap", command=self.refresh_plot).pack(side=tk.LEFT, padx=10)
+        ttk.Button(frame_conf, text="Update View", command=self.refresh_plot).pack(side=tk.LEFT, padx=10)
         
-        self.fig = plt.Figure(figsize=(6, 6), dpi=100)
+        # --- Main Plot Canvas ---
+        self.fig = plt.Figure(figsize=(8, 6), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
+        # --- Bottom ROI Frame ---
         frame_btm = ttk.Frame(self); frame_btm.pack(fill=tk.X, padx=10, pady=10)
         self.btn_draw = ttk.Button(frame_btm, text="Start Drawing ROI", command=self.start_drawing, state="disabled")
         self.btn_draw.pack(side=tk.LEFT, padx=5)
@@ -534,12 +567,10 @@ class ROIAnalysisWindow(tk.Toplevel):
 
     def reset_all(self):
         self.ref_image = None; self.diff_map = None; self.roi_verts = None
-        if self.poly_selector:
-            self.poly_selector.set_active(False)
-            self.poly_selector = None
+        if self.poly_selector: self.poly_selector.set_active(False); self.poly_selector = None
         self.lbl_result.config(text="Result: ---")
         self.btn_draw.config(state="disabled"); self.btn_calc.config(state="disabled")
-        self.ax.cla(); self.canvas.draw()
+        self.fig.clf(); self.ax = self.fig.add_subplot(111); self.canvas.draw()
 
     def load_ref_image(self):
         path = filedialog.askopenfilename(title="Select Reference Image", filetypes=[("Images", "*.tif *.tiff *.png *.jpg"), ("All", "*.*")])
@@ -570,27 +601,55 @@ class ROIAnalysisWindow(tk.Toplevel):
         if self.diff_map is not None: self.btn_calc.config(state="normal")
 
     def refresh_plot(self):
-        self.ax.cla()
+        self.fig.clf() # 図全体をクリア
         mode = self.view_mode.get()
-        if mode == "heatmap" and self.diff_map is not None:
-            masked_map = np.ma.masked_invalid(self.diff_map)
-            valid = self.diff_map[np.isfinite(self.diff_map)]
-            vmin, vmax = 0, 1
-            if len(valid) > 0:
-                vmin = np.min(valid)
-                if self.disp_auto.get(): vmax = np.percentile(valid, self.disp_perc.get())
-                else: vmax = self.disp_max.get()
-            self.ax.imshow(masked_map, cmap='jet', vmin=vmin, vmax=vmax)
-            self.ax.set_title("Diffusion Map View")
-        elif mode == "reference" and self.ref_image is not None:
-            self.ax.imshow(self.ref_image, cmap='gray')
-            self.ax.set_title("Reference Image View")
-        elif self.diff_map is not None: self.ax.imshow(self.diff_map, cmap='jet')
-        elif self.ref_image is not None: self.ax.imshow(self.ref_image, cmap='gray')
+        
+        # 描画用ヘルパー関数
+        def plot_map(ax, data, title, is_heatmap=False):
+            if is_heatmap:
+                masked_map = np.ma.masked_invalid(data)
+                valid = data[np.isfinite(data)]
+                vmin, vmax = 0, 1
+                if len(valid) > 0:
+                    vmin = np.min(valid)
+                    if self.disp_auto.get(): vmax = np.percentile(valid, self.disp_perc.get())
+                    else: vmax = self.disp_max.get()
+                im = ax.imshow(masked_map, cmap='jet', vmin=vmin, vmax=vmax)
+                self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            else:
+                ax.imshow(data, cmap='gray')
+            ax.set_title(title)
             
-        if self.roi_verts is not None:
-            poly = patches.Polygon(self.roi_verts, closed=True, linewidth=2, edgecolor='red', facecolor='none')
-            self.ax.add_patch(poly)
+            # ROI表示
+            if self.roi_verts is not None:
+                poly = patches.Polygon(self.roi_verts, closed=True, linewidth=2, edgecolor='red', facecolor='none')
+                ax.add_patch(poly)
+
+        # モード分岐
+        if mode == "both":
+            ax1 = self.fig.add_subplot(121)
+            ax2 = self.fig.add_subplot(122)
+            
+            if self.ref_image is not None: plot_map(ax1, self.ref_image, "Reference")
+            else: ax1.text(0.5, 0.5, "No Reference Image", ha='center')
+            
+            if self.diff_map is not None: plot_map(ax2, self.diff_map, "Heatmap", is_heatmap=True)
+            else: ax2.text(0.5, 0.5, "No Diffusion Data", ha='center')
+            
+            # DrawingはHeatmap側(ax2)で行うように設定
+            self.ax = ax2 
+            
+        else:
+            self.ax = self.fig.add_subplot(111)
+            if mode == "heatmap" and self.diff_map is not None:
+                plot_map(self.ax, self.diff_map, "Heatmap", is_heatmap=True)
+            elif mode == "reference" and self.ref_image is not None:
+                plot_map(self.ax, self.ref_image, "Reference")
+            elif self.diff_map is not None: 
+                plot_map(self.ax, self.diff_map, "Heatmap", is_heatmap=True)
+            elif self.ref_image is not None:
+                plot_map(self.ax, self.ref_image, "Reference")
+        
         self.canvas.draw()
 
     def start_drawing(self):
@@ -608,6 +667,7 @@ class ROIAnalysisWindow(tk.Toplevel):
             y, x = np.mgrid[:H, :W]
             points = np.vstack((x.ravel(), y.ravel())).T
             path = Path(self.roi_verts)
+            # 統計時は厳密判定
             mask = path.contains_points(points).reshape(H, W)
             roi_values = self.diff_map[mask]
             valid_values = roi_values[np.isfinite(roi_values)]
@@ -622,6 +682,106 @@ class ROIAnalysisWindow(tk.Toplevel):
             self.lbl_result.config(text=res_str); messagebox.showinfo("ROI Result", res_str)
         except Exception as e: messagebox.showerror("Error", str(e))
 
+    def show_current_histogram(self):
+        if self.diff_map is None: return
+        
+        target_data = []
+        if self.roi_verts is not None:
+            H, W = self.diff_map.shape
+            y, x = np.mgrid[:H, :W]
+            points = np.vstack((x.ravel(), y.ravel())).T
+            path = Path(self.roi_verts)
+            mask = path.contains_points(points).reshape(H, W)
+            roi_vals = self.diff_map[mask]
+            target_data = roi_vals[np.isfinite(roi_vals)]
+            title = "Histogram (ROI)"
+        else:
+            target_data = self.diff_map[np.isfinite(self.diff_map)]
+            title = "Histogram (Full Image)"
+            
+        if len(target_data) == 0:
+            messagebox.showwarning("Info", "No valid data to plot.")
+            return
+            
+        # 範囲設定の適用
+        hist_range = None
+        if self.hist_use_range.get():
+            hist_range = (self.hist_min.get(), self.hist_max.get())
+            title += f" [Range: {hist_range[0]}-{hist_range[1]}]"
+
+        hist_win = tk.Toplevel(self)
+        hist_win.title(title)
+        fig = plt.Figure(figsize=(6, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        # range引数を指定してヒストグラム作成
+        ax.hist(target_data, bins=self.hist_bins.get(), range=hist_range, color='skyblue', edgecolor='black', alpha=0.7)
+        ax.set_xlabel("Diffusion Coefficient (D)")
+        ax.set_ylabel("Count")
+        
+        # 統計値（フィルタ後の統計を表示するか、全体かは用途によるが、ここでは全体の平均を表示）
+        ax.set_title(f"{title}\nMean: {np.mean(target_data):.2f}, Std: {np.std(target_data):.2f}")
+        
+        canvas = FigureCanvasTkAgg(fig, master=hist_win)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        toolbar = NavigationToolbar2Tk(canvas, hist_win); toolbar.update()
+
+    def run_batch_histogram(self):
+        target_dir = filedialog.askdirectory(title="Select Root Directory for Batch Histograms")
+        if not target_dir: return
+        
+        # ★ 修正1: recursive=True と "**" パターンを使って、サブディレクトリも含めて全検索する
+        csv_files = glob.glob(os.path.join(target_dir, "**", "*.csv"), recursive=True)
+        
+        if not csv_files:
+            messagebox.showinfo("Info", "No CSV files found in directory (recursive search).")
+            return
+            
+        # 設定の取得
+        bins_count = self.hist_bins.get()
+        hist_range = None
+        if self.hist_use_range.get():
+            hist_range = (self.hist_min.get(), self.hist_max.get())
+            
+        processed_count = 0
+        
+        try:
+            for fpath in csv_files:
+                try:
+                    data = np.loadtxt(fpath, delimiter=',')
+                    valid_data = data[np.isfinite(data)]
+                    if len(valid_data) == 0: continue
+                    
+                    fname = os.path.basename(fpath)
+                    
+                    # ★ 修正2: 保存先を「CSVがあるディレクトリ」と同じ場所にする
+                    save_dir = os.path.dirname(fpath)
+                    save_path = os.path.join(save_dir, os.path.splitext(fname)[0] + "_hist.png")
+                    
+                    # プロット作成
+                    fig = plt.figure(figsize=(6, 4))
+                    ax = fig.add_subplot(111)
+                    
+                    # range引数を適用
+                    ax.hist(valid_data, bins=bins_count, range=hist_range, color='orange', edgecolor='black', alpha=0.7)
+                    
+                    ax.set_xlabel("D (um^2/s)")
+                    ax.set_ylabel("Frequency")
+                    title_str = f"Hist: {fname}\nMean: {np.mean(valid_data):.2f}, N={len(valid_data)}"
+                    if hist_range: title_str += f" [R: {hist_range[0]}-{hist_range[1]}]"
+                    ax.set_title(title_str)
+                    
+                    fig.tight_layout()
+                    fig.savefig(save_path)
+                    plt.close(fig) # メモリ解放
+                    processed_count += 1
+                except Exception as e:
+                    print(f"Skipped {fpath}: {e}")
+            
+            messagebox.showinfo("Batch Complete", f"Generated {processed_count} histograms.\nSaved in respective directories.")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Batch processing failed: {e}")
 
 # =============================================================================
 # ★ Main Application Class

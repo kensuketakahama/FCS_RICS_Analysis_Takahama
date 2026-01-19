@@ -16,12 +16,6 @@ Desktop.ini
 # --- Environments (もしvenvなどを使っている場合) ---
 .env
 .venv
-.spec
 env/
 venv/
 ENV/
-
-# ---app---
-build/
-dist/
-RICS_Analysis_App.spec

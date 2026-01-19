@@ -15,7 +15,7 @@ from src import model
 class FCSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("FCS Analysis App v9.0 (Grid Layout & Auto-Clamp)")
+        self.root.title("FCS Analysis App v9.1 (Structure Factor S)")
         self.root.geometry("1400x1000")
 
         # Data
@@ -37,15 +37,23 @@ class FCSApp:
         self.n_segments_var = tk.IntVar(value=1)
 
         # --- Fitting Parameters ---
-        # 辞書で一元管理
+        # wz の代わりに S (Structure Factor = wz/w0) を導入
+        # 初期値のSは configがあればそこから計算、なければ5.0とする
+        init_S = 5.0
+        try:
+            if cfg.W0 > 0:
+                init_S = cfg.WZ / cfg.W0
+        except:
+            pass
+
         self.params = {
-            'N':        {'val': 1.0,   'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
-            'D':        {'val': 414.0, 'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
-            'w0':       {'val': cfg.W0,'fix': True,  'b_on': False, 'min': 0.0, 'max': 'inf'},
-            'wz':       {'val': cfg.WZ,'fix': True,  'b_on': False, 'min': 0.0, 'max': 'inf'},
-            'T':        {'val': 0.1,   'fix': False, 'b_on': True,  'min': 0.0, 'max': 1.0},
-            'tau_trip': {'val': 1e-6,  'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
-            'y0':       {'val': 0.0,   'fix': False, 'b_on': False, 'min': -1.0,'max': 1.0}
+            'N':        {'val': 1.0,    'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
+            'D':        {'val': 414.0,  'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
+            'w0':       {'val': cfg.W0, 'fix': True,  'b_on': False, 'min': 0.0, 'max': 'inf'},
+            'S':        {'val': init_S, 'fix': True,  'b_on': False, 'min': 0.0, 'max': 'inf'}, # wzの代わり
+            'T':        {'val': 0.1,    'fix': False, 'b_on': True,  'min': 0.0, 'max': 1.0},
+            'tau_trip': {'val': 1e-6,   'fix': False, 'b_on': False, 'min': 0.0, 'max': 'inf'},
+            'y0':       {'val': 0.0,    'fix': False, 'b_on': False, 'min': -1.0,'max': 1.0}
         }
         
         # Tkinter変数への変換
@@ -58,6 +66,13 @@ class FCSApp:
                 'min': tk.StringVar(value=str(v['min'])),
                 'max': tk.StringVar(value=str(v['max']))
             }
+        
+        # 自動計算されるwzの表示用変数
+        self.wz_display_var = tk.StringVar(value="0.0")
+        
+        # w0 または S が変更されたら wz を再計算するトレーサーを設定
+        self.p_vars['w0']['val'].trace_add("write", self.update_wz_display)
+        self.p_vars['S']['val'].trace_add("write", self.update_wz_display)
 
         # Fitting Range
         self.range_min_var = tk.DoubleVar(value=1e-5)
@@ -68,6 +83,19 @@ class FCSApp:
 
         self.create_layout()
         self.setup_plots()
+        
+        # 初期表示更新
+        self.update_wz_display()
+
+    def update_wz_display(self, *args):
+        """w0 * S = wz を計算して表示を更新"""
+        try:
+            w0 = self.p_vars['w0']['val'].get()
+            S = self.p_vars['S']['val'].get()
+            wz = w0 * S
+            self.wz_display_var.set(f"{wz:.4f}")
+        except:
+            self.wz_display_var.set("Error")
 
     def create_layout(self):
         panel = ttk.Frame(self.root, padding="10")
@@ -118,12 +146,16 @@ class FCSApp:
             ttk.Label(grid_frame, text=text, font=("bold", 9)).grid(row=0, column=col, padx=3, pady=2)
 
         # Rows
-        param_order = ['N', 'D', 'w0', 'wz', 'T', 'tau_trip', 'y0']
-        for row_idx, key in enumerate(param_order, start=1):
+        param_order = ['N', 'D', 'w0', 'S', 'T', 'tau_trip', 'y0']
+        row_idx = 1
+        for key in param_order:
             vars = self.p_vars[key]
             
             # Param Name
-            ttk.Label(grid_frame, text=key).grid(row=row_idx, column=0, padx=3, pady=2, sticky="e")
+            label_text = key
+            if key == 'S': label_text = "S (wz/w0)"
+            
+            ttk.Label(grid_frame, text=label_text).grid(row=row_idx, column=0, padx=3, pady=2, sticky="e")
             
             # Value
             ttk.Entry(grid_frame, textvariable=vars['val'], width=8).grid(row=row_idx, column=1, padx=3)
@@ -137,6 +169,16 @@ class FCSApp:
             # Min / Max
             ttk.Entry(grid_frame, textvariable=vars['min'], width=6).grid(row=row_idx, column=4, padx=1)
             ttk.Entry(grid_frame, textvariable=vars['max'], width=6).grid(row=row_idx, column=5, padx=1)
+            
+            row_idx += 1
+
+        # --- Display Calculated wz ---
+        ttk.Label(grid_frame, text="wz (calc)").grid(row=row_idx, column=0, padx=3, pady=2, sticky="e")
+        wz_entry = ttk.Entry(grid_frame, textvariable=self.wz_display_var, width=8, state='readonly')
+        wz_entry.grid(row=row_idx, column=1, padx=3)
+        ttk.Label(grid_frame, text="[ReadOnly]").grid(row=row_idx, column=2, columnspan=2, sticky="w")
+        
+        row_idx += 1
 
         ttk.Button(panel, text="Run Fitting", command=self.run_fitting).pack(fill=tk.X, pady=15)
 
@@ -231,8 +273,13 @@ class FCSApp:
                 self.ax_acf.errorbar(self.acf_lags, self.acf_G, yerr=self.acf_sigma, 
                                      fmt='bo', ms=3, capsize=2, alpha=0.5, label='Data')
             else:
-                self.ax_acf.plot(self.acf_lags[::plot_step], self.acf_G[::plot_step], 
-                                 'b.', ms=2, alpha=0.3, label='Data')
+                # ショットノイズ(Lag0)を避けるため [1::] で表示
+                plot_data_lags = self.acf_lags[1::plot_step] if len(self.acf_lags) > 1 else self.acf_lags
+                plot_data_G = self.acf_G[1::plot_step] if len(self.acf_G) > 1 else self.acf_G
+                
+                self.ax_acf.plot(plot_data_lags, plot_data_G, 
+                                 'b.', ms=2, alpha=0.5, label='Data')
+            
             self.ax_acf.set_xscale('log')
 
         if fit_curve_lags is not None:
@@ -254,8 +301,13 @@ class FCSApp:
         
         t_min = self.range_min_var.get()
         t_max = self.range_max_var.get()
-        mask = (self.acf_lags >= t_min) & (self.acf_lags <= t_max)
         
+        # 範囲マスクと負値除外（簡易）
+        mask = (self.acf_lags >= t_min) & (self.acf_lags <= t_max)
+        if not self.use_log_bin_var.get():
+             # Binningなしの場合は負のノイズを除外したほうが安定する
+             mask = mask & (self.acf_G > -0.1) 
+
         x_fit = self.acf_lags[mask]
         y_fit = self.acf_G[mask]
         sigma_fit = self.acf_sigma[mask]
@@ -273,8 +325,8 @@ class FCSApp:
             messagebox.showerror("Error", "Not enough points")
             return
 
-        # Prepare Params
-        param_order = ['N', 'D', 'w0', 'wz', 'T', 'tau_trip', 'y0']
+        # Prepare Params (wzはSから計算されるのでここにはない)
+        param_order = ['N', 'D', 'w0', 'S', 'T', 'tau_trip', 'y0']
         
         vals = {}
         fixed = {}
@@ -293,8 +345,6 @@ class FCSApp:
             if not is_fix:
                 free_keys.append(k)
                 
-                # --- Bounds Logic & Initial Value Clamping ---
-                # CheckboxがONなら入力値を、OFFならデフォルト(0-inf)を使用
                 if v['b_on'].get():
                     try: mn = float(v['min'].get())
                     except: mn = -np.inf
@@ -303,15 +353,12 @@ class FCSApp:
                         mx = np.inf if (not s_max or s_max.lower() == 'inf') else float(s_max)
                     except: mx = np.inf
                 else:
-                    # Default Safe Bounds
                     if k == 'y0': mn = -np.inf
-                    elif k == 'T': mn = 0.0; mx = 1.0 # Tは物理的に0-1
+                    elif k == 'T': mn = 0.0; mx = 1.0
                     else: mn = 0.0
                     mx = np.inf
-                    if k == 'T' and not v['b_on'].get(): mx = 1.0 # T Default
+                    if k == 'T' and not v['b_on'].get(): mx = 1.0
 
-                # ★ Clamping: 初期値が範囲外なら強制的に内側へ入れる
-                # これにより「範囲外のパラメータ」が入力されても計算がスタートできる
                 epsilon = 1e-9
                 if val < mn: val = mn + epsilon
                 if val > mx: val = mx - epsilon
@@ -328,14 +375,19 @@ class FCSApp:
             current = vals.copy()
             for i, key in enumerate(free_keys):
                 current[key] = args[i]
+            
+            # Sとw0からwzを計算してモデルに渡す
+            calc_wz = current['w0'] * current['S']
+            
             return model.fcs_standard_model(
-                t, current['N'], current['D'], current['w0'], current['wz'],
+                t, current['N'], current['D'], current['w0'], calc_wz,
                 current['T'], current['tau_trip'], current['y0']
             )
 
         try:
+            # 修正: maxfev を 3000 -> 20000 に増加
             popt, _ = curve_fit(wrapper, x_fit, y_fit, p0=p0, sigma=sigma_fit, 
-                                absolute_sigma=absolute_sigma, bounds=(bounds_low, bounds_high), maxfev=3000)
+                                absolute_sigma=absolute_sigma, bounds=(bounds_low, bounds_high), maxfev=20000)
             
             for i, key in enumerate(free_keys):
                 vals[key] = popt[i]
@@ -350,11 +402,16 @@ class FCSApp:
         T_val = vals['T']
         g0 = (1.0 / vals['N']) * (1.0 / (1.0 - T_val)) + vals['y0'] if T_val < 1.0 else 0
         
+        # wz を確定値から計算
+        final_wz = vals['w0'] * vals['S']
+        self.wz_display_var.set(f"{final_wz:.4f}")
+        
         res_str = (
             f"D = {vals['D']:.2f}\n"
             f"N = {vals['N']:.3f}\n"
             f"T = {vals['T']*100:.1f} %\n"
             f"tau_T = {vals['tau_trip']*1e6:.1f} us\n"
+            f"S = {vals['S']:.2f} (wz={final_wz:.3f})\n"
             f"G(0) = {g0:.4f}\n"
             f"w0 = {vals['w0']:.3f}"
         )
@@ -362,7 +419,7 @@ class FCSApp:
         
         smooth = np.logspace(np.log10(min(self.acf_lags[self.acf_lags>0])), np.log10(max(self.acf_lags)), 200)
         smooth_G = model.fcs_standard_model(
-            smooth, vals['N'], vals['D'], vals['w0'], vals['wz'],
+            smooth, vals['N'], vals['D'], vals['w0'], final_wz,
             vals['T'], vals['tau_trip'], vals['y0']
         )
         self.plot_graphs(smooth, smooth_G)
