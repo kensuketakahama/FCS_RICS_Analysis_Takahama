@@ -19,3 +19,9 @@ Desktop.ini
 env/
 venv/
 ENV/
+
+# --- distribution ---
+Distribution/
+build/
+dist/
+.spec
