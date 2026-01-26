@@ -1,10 +1,10 @@
 import numpy as np
 
 def rics_3d_equation(xy, D, G0, w0, wz, pixel_size, pixel_dwell, line_time, 
-                     T=0.0, tau_trip=0.0, use_triplet=False):
+                     T=0.0, tau_trip=0.0, use_triplet=False, y0=0.0):
     """
     RICS 3D diffusion model.
-    Includes optional Triplet blinking term.
+    Includes optional Triplet blinking term and Offset (y0).
     """
     # 1次元配列として受け取った座標を展開
     xi = xy[0] * pixel_size  # spatial lag x (m)
@@ -30,23 +30,16 @@ def rics_3d_equation(xy, D, G0, w0, wz, pixel_size, pixel_dwell, line_time,
         G_trip = 1.0 + (T / (1.0 - T)) * np.exp(-tau / tau_trip)
     
     # --- スキャン空間相関項 (Spatial Scanning Term) ---
-    # RICSでは拡散による広がりとスキャンによる空間的なズレの重なりを考慮する
-    # 一般的な式: S = exp( - (xi^2 + psi^2) / (w0^2 + 4D*tau) )
-    
     w0_sq_t = w0_sq + 4 * D * tau
     
     # 係数部分: G0 / N 相当 (ここではG0としてまとめる)
-    # G(0,0)での振幅に対する減衰項を含める
     amplitude_factor = (w0_sq / w0_sq_t)
     
     spatial_exp = np.exp( - (xi**2 + psi**2) / w0_sq_t )
     
-    # 最終的な G(xi, psi)
-    # G_val = G0 * G_trip * G_diff * S_scan
-    # ※ G_diff の一部は spatial_exp の係数として組み込まれる形になることが多いが、
-    # ここでは一般的なRICSのフィッティング式に従う
-    
     # 標準的なRICS式（Digman et al.）
+    # G_val = G0 * G_trip * G_diff * S_scan
     G_val = G0 * G_trip * amplitude_factor * term2 * spatial_exp
         
-    return G_val.ravel()
+    # オフセットを加算して返す
+    return G_val.ravel() + y0

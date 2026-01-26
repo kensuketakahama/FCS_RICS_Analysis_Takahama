@@ -53,7 +53,7 @@ class BatchConfigWindow(tk.Toplevel):
     def __init__(self, master, file_list, root_dir, execute_callback):
         super().__init__(master)
         self.title(f"Batch Processing Config - {len(file_list)} files found")
-        self.geometry("1250x950")
+        self.geometry("1300x950")
         self.file_list = file_list
         self.root_dir = root_dir
         self.execute_callback = execute_callback
@@ -74,22 +74,43 @@ class BatchConfigWindow(tk.Toplevel):
         self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
         self.line_time = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0)
         
-        # Fitting Params
-        self.fit_D = tk.DoubleVar(value=10.0)
-        self.fit_G0 = tk.DoubleVar(value=0.01)
-        self.fit_w0 = tk.DoubleVar(value=cfg.W0)
-        self.fit_wz = tk.DoubleVar(value=cfg.WZ)
-        self.fix_w0 = tk.BooleanVar(value=True)
-        self.fix_wz = tk.BooleanVar(value=True)
+        # --- Fitting Params (Value, Fix, UseLimit, Min, Max) ---
+        self.fit_vars = {}
         
-        # ★ Triplet Settings
+        # Initial values
+        init_vals = {
+            "D": 10.0, "G0": 0.01, "w0": cfg.W0, "AR": cfg.WZ / cfg.W0, # AR = wz/w0
+            "y0": 0.0, "T": 0.05, "tau_trip": 5.0
+        }
+        # Fixed defaults
+        defaults_fix = {"w0": True, "AR": True, "y0": False, "T": False, "tau_trip": False, "D": False, "G0": False}
+        
+        for k, v in init_vals.items():
+            self.fit_vars[k] = {
+                "val": tk.DoubleVar(value=v),
+                "fix": tk.BooleanVar(value=defaults_fix.get(k, False)),
+                "use_lim": tk.BooleanVar(value=False),
+                "min": tk.DoubleVar(value=0.0),
+                "max": tk.DoubleVar(value=100.0) # Default max
+            }
+            # Adjust specific defaults
+            if k == "y0": 
+                self.fit_vars[k]["min"].set(-0.1); self.fit_vars[k]["max"].set(0.1)
+            if k == "T":
+                self.fit_vars[k]["max"].set(1.0)
+            if k == "AR":
+                self.fit_vars[k]["max"].set(20.0)
+
+        # Calculated wz for display
+        self.wz_display_var = tk.DoubleVar()
+        self._update_wz() # Init
+        
+        # Add trace to update wz when w0 or AR changes
+        self.fit_vars["w0"]["val"].trace_add("write", self._update_wz)
+        self.fit_vars["AR"]["val"].trace_add("write", self._update_wz)
+
+        # Triplet Toggle
         self.use_triplet = tk.BooleanVar(value=False)
-        self.fit_T = tk.DoubleVar(value=0.05)
-        self.fit_tau_trip = tk.DoubleVar(value=5.0) # us
-        self.fix_T = tk.BooleanVar(value=False)
-        self.fix_tau_trip = tk.BooleanVar(value=False)
-        self.min_T = tk.DoubleVar(value=0.0)
-        self.max_T = tk.DoubleVar(value=0.5)
         
         # Heatmap Settings
         self.hm_win = tk.IntVar(value=32)
@@ -98,7 +119,11 @@ class BatchConfigWindow(tk.Toplevel):
         self.range_x = tk.IntVar(value=16)
         self.range_y = tk.IntVar(value=16)
         self.auto_range = tk.BooleanVar(value=False)
-        self.mask_outside = tk.BooleanVar(value=False)
+        
+        # Masking & ARICS Options for Batch
+        self.padding_mode_var = tk.StringVar(value="mean") 
+        self.use_arics_norm_var = tk.BooleanVar(value=False)
+        self.exclude_outer_lag_var = tk.BooleanVar(value=True)
         
         # Output Settings
         self.hm_autoscale = tk.BooleanVar(value=True)
@@ -106,7 +131,7 @@ class BatchConfigWindow(tk.Toplevel):
         self.hm_max = tk.DoubleVar(value=100.0)
         self.hm_interp = tk.StringVar(value="nearest")
 
-        self.roi_mode_var = tk.StringVar(value="common")  # "common" or "individual"
+        self.roi_mode_var = tk.StringVar(value="common")
         self.roi_map = {}
         self.common_roi = None
         self.poly_selector = None
@@ -118,10 +143,18 @@ class BatchConfigWindow(tk.Toplevel):
             self.file_lb.selection_set(0)
             self._on_file_select(None)
 
+    def _update_wz(self, *args):
+        try:
+            w0 = self.fit_vars["w0"]["val"].get()
+            ar = self.fit_vars["AR"]["val"].get()
+            self.wz_display_var.set(round(w0 * ar, 5))
+        except:
+            pass
+
     def _create_layout(self):
         left_frame = ttk.Frame(self, width=300, padding=5)
         left_frame.pack(side=tk.LEFT, fill=tk.Y)
-        right_frame = ttk.Frame(self, width=350, padding=10)
+        right_frame = ttk.Frame(self, width=450, padding=10) # Wider for params
         right_frame.pack(side=tk.RIGHT, fill=tk.Y)
         center_frame = ttk.Frame(self, padding=5)
         center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -178,49 +211,58 @@ class BatchConfigWindow(tk.Toplevel):
         # --- Right Frame ---
         p_grp = ttk.LabelFrame(right_frame, text="1. Scan Settings")
         p_grp.pack(fill=tk.X, pady=5)
-        self._add_entry(p_grp, "Mov.Avg:", self.ma_win)
-        self._add_entry(p_grp, "Pixel Size (nm):", self.px_size)
-        self._add_entry(p_grp, "Pixel Dwell (us):", self.px_dwell)
-        self._add_entry(p_grp, "Line Time (ms):", self.line_time)
+        self._add_simple_entry(p_grp, "Mov.Avg:", self.ma_win)
+        self._add_simple_entry(p_grp, "Pixel Size (nm):", self.px_size)
+        self._add_simple_entry(p_grp, "Pixel Dwell (us):", self.px_dwell)
+        self._add_simple_entry(p_grp, "Line Time (ms):", self.line_time)
         
         f_grp = ttk.LabelFrame(right_frame, text="2. Fitting Model")
         f_grp.pack(fill=tk.X, pady=5)
-        self._add_entry(f_grp, "D (um2/s):", self.fit_D)
-        self._add_entry(f_grp, "G0:", self.fit_G0)
-        self._add_entry(f_grp, "w0 (um):", self.fit_w0, self.fix_w0)
-        self._add_entry(f_grp, "wz (um):", self.fit_wz, self.fix_wz)
+        
+        # Standard Params
+        self._add_param_row(f_grp, "D (um2/s):", "D")
+        self._add_param_row(f_grp, "G0:", "G0")
+        self._add_param_row(f_grp, "w0 (um):", "w0")
+        self._add_param_row(f_grp, "wz/w0 (AR):", "AR") 
+        
+        # wz (read-only)
+        wz_row = ttk.Frame(f_grp); wz_row.pack(fill=tk.X, pady=1)
+        ttk.Label(wz_row, text="wz (calc):", width=12).pack(side=tk.LEFT)
+        ttk.Entry(wz_row, textvariable=self.wz_display_var, width=8, state="readonly").pack(side=tk.LEFT, padx=2)
+        
+        self._add_param_row(f_grp, "y0 (Offset):", "y0")
         
         # Triplet Config
         t_frame = ttk.Frame(f_grp); t_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(t_frame, text="Include Triplet", variable=self.use_triplet, command=self._toggle_triplet_ui).pack(anchor="w")
         self.triplet_container = ttk.Frame(f_grp)
-        # Note: Initially packed or unpacked based on variable, see below
-        self._add_entry(self.triplet_container, "T (frac):", self.fit_T, self.fix_T)
-        rf = ttk.Frame(self.triplet_container); rf.pack(fill=tk.X, pady=1)
-        ttk.Label(rf, text="T Range:", width=10).pack(side=tk.LEFT)
-        ttk.Entry(rf, textvariable=self.min_T, width=5).pack(side=tk.LEFT)
-        ttk.Label(rf, text="-").pack(side=tk.LEFT)
-        ttk.Entry(rf, textvariable=self.max_T, width=5).pack(side=tk.LEFT)
-        self._add_entry(self.triplet_container, "tau_T (us):", self.fit_tau_trip, self.fix_tau_trip)
-        
-        # 初期状態の反映
+        self._add_param_row(self.triplet_container, "T (frac):", "T")
+        self._add_param_row(self.triplet_container, "tau_T (us):", "tau_trip")
         self._toggle_triplet_ui()
 
-        h_grp = ttk.LabelFrame(right_frame, text="3. Heatmap")
+        h_grp = ttk.LabelFrame(right_frame, text="3. Heatmap & Masking")
         h_grp.pack(fill=tk.X, pady=5)
-        self._add_entry(h_grp, "Win:", self.hm_win)
-        self._add_entry(h_grp, "Step:", self.hm_step)
-        self._add_entry(h_grp, "Omit R:", self.omit_r)
-        self._add_entry(h_grp, "Range X:", self.range_x)
-        self._add_entry(h_grp, "Range Y:", self.range_y)
+        self._add_simple_entry(h_grp, "Win:", self.hm_win)
+        self._add_simple_entry(h_grp, "Step:", self.hm_step)
+        self._add_simple_entry(h_grp, "Omit R:", self.omit_r)
+        self._add_simple_entry(h_grp, "Range X:", self.range_x)
+        self._add_simple_entry(h_grp, "Range Y:", self.range_y)
         ttk.Checkbutton(h_grp, text="Auto Range", variable=self.auto_range).pack(anchor="w")
-        ttk.Checkbutton(h_grp, text="Mask Outside ROI", variable=self.mask_outside).pack(anchor="w")
+        
+        pad_lbl = ttk.Label(h_grp, text="Fill Mode:"); pad_lbl.pack(anchor="w")
+        pad_f = ttk.Frame(h_grp); pad_f.pack(fill=tk.X)
+        ttk.Radiobutton(pad_f, text="Mean", variable=self.padding_mode_var, value="mean").pack(side=tk.LEFT)
+        ttk.Radiobutton(pad_f, text="Zero", variable=self.padding_mode_var, value="zero").pack(side=tk.LEFT)
+        ttk.Radiobutton(pad_f, text="None", variable=self.padding_mode_var, value="none").pack(side=tk.LEFT)
+        
+        ttk.Checkbutton(h_grp, text="ARICS Norm", variable=self.use_arics_norm_var).pack(anchor="w")
+        ttk.Checkbutton(h_grp, text="Exclude Outer Lag", variable=self.exclude_outer_lag_var).pack(anchor="w")
         
         o_grp = ttk.LabelFrame(right_frame, text="4. Output")
         o_grp.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(o_grp, text="Auto Scale", variable=self.hm_autoscale).pack(anchor="w")
-        self._add_entry(o_grp, "Percentile:", self.hm_percentile)
-        self._add_entry(o_grp, "Max D:", self.hm_max)
+        self._add_simple_entry(o_grp, "Percentile:", self.hm_percentile)
+        self._add_simple_entry(o_grp, "Max D:", self.hm_max)
         ttk.Combobox(o_grp, textvariable=self.hm_interp, values=["nearest", "bicubic"]).pack(fill=tk.X)
 
         ttk.Button(right_frame, text="START BATCH", command=self._on_run).pack(fill=tk.X, pady=20)
@@ -229,11 +271,21 @@ class BatchConfigWindow(tk.Toplevel):
         if self.use_triplet.get(): self.triplet_container.pack(fill=tk.X)
         else: self.triplet_container.pack_forget()
 
-    def _add_entry(self, parent, label, var, check_var=None):
+    def _add_simple_entry(self, parent, label, var):
         f = ttk.Frame(parent); f.pack(fill=tk.X, pady=1)
         ttk.Label(f, text=label, width=12).pack(side=tk.LEFT)
         ttk.Entry(f, textvariable=var, width=8).pack(side=tk.LEFT)
-        if check_var: ttk.Checkbutton(f, text="Fix", variable=check_var).pack(side=tk.LEFT, padx=5)
+
+    def _add_param_row(self, parent, label, key):
+        p = self.fit_vars[key]
+        row = ttk.Frame(parent); row.pack(fill=tk.X, pady=1)
+        ttk.Label(row, text=label, width=12).pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=p["val"], width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(row, text="Fix", variable=p["fix"]).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(row, text="Lim", variable=p["use_lim"]).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=p["min"], width=4).pack(side=tk.LEFT)
+        ttk.Label(row, text="-").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=p["max"], width=4).pack(side=tk.LEFT)
 
     def _on_file_select(self, event):
         idx = self.file_lb.curselection()
@@ -264,13 +316,22 @@ class BatchConfigWindow(tk.Toplevel):
 
     def update_preview_image(self):
         if self.raw_stack is None: return
-        if self.current_frame_idx == -1:
-            self.current_preview_data = np.mean(self.raw_stack, axis=0)
-            self.lbl_frame.config(text="Frame: Avg")
-        else:
+        
+        # Slideshow mode: use raw frame if playing
+        if self.is_playing and self.current_frame_idx >= 0:
             idx = min(max(0, self.current_frame_idx), self.total_frames-1)
             self.current_preview_data = self.raw_stack[idx]
-            self.lbl_frame.config(text=f"Frame: {idx}")
+            self.lbl_frame.config(text=f"Frame: {idx} (Raw)")
+        # Normal mode: use average or specific frame but normally average
+        else:
+            if self.current_frame_idx == -1:
+                self.current_preview_data = np.mean(self.raw_stack, axis=0)
+                self.lbl_frame.config(text="Frame: Avg")
+            else:
+                idx = min(max(0, self.current_frame_idx), self.total_frames-1)
+                self.current_preview_data = self.raw_stack[idx]
+                self.lbl_frame.config(text=f"Frame: {idx}")
+        
         self._refresh_roi_display()
 
     def start_slideshow(self):
@@ -284,14 +345,21 @@ class BatchConfigWindow(tk.Toplevel):
         idx = self.current_frame_idx + 1
         if idx >= self.total_frames: idx = 0
         self.current_frame_idx = idx
-        self.slider.set(idx)
-        self.play_job = self.after(100, self._play_loop)
+        
+        # 修正前: self.slider.set(idx)
+        # 修正後: self.frame_slider.set(idx)
+        self.frame_slider.set(idx) 
+        
+        self.play_job = self.root.after(100, self._play_loop)
 
     def stop_slideshow(self):
         self.is_playing = False
         if self.play_job:
-            self.after_cancel(self.play_job)
+            self.root.after_cancel(self.play_job)
             self.play_job = None
+        
+        # 停止した時点のフレームを維持して解析・表示更新を行う
+        self.update_processing_and_acf()
 
     def use_rect_roi(self):
         if self.poly_selector: self.poly_selector.set_active(False); self.poly_selector = None
@@ -367,6 +435,7 @@ class BatchConfigWindow(tk.Toplevel):
         if w<=0 or h<=0: return
         xmin = min(x1, x2); ymin = min(y1, y2)
         new_roi = {'type': 'rect', 'data': [xmin, ymin, w, h]}
+        # ★ 修正: self.roi_mode -> self.roi_mode_var
         if self.roi_mode_var.get() == "common": self.common_roi = new_roi
         else:
             if self.current_file_path: self.roi_map[self.current_file_path] = new_roi
@@ -390,6 +459,29 @@ class BatchConfigWindow(tk.Toplevel):
         roi_param = self.roi_map if self.roi_mode_var.get() == "individual" else self.common_roi
         if self.roi_mode_var.get() == "common" and self.common_roi is None: return
         
+        fit_params = {}
+        fixed_params = {}
+        bounds = {}
+        
+        for k, v in self.fit_vars.items():
+            val = v["val"].get()
+            if k == "tau_trip": val *= 1e-6 # us -> s
+            
+            fit_params[k] = val
+            fixed_params[k] = v["fix"].get()
+            
+            if v["use_lim"].get():
+                mn = v["min"].get()
+                mx = v["max"].get()
+                if k == "tau_trip": mn*=1e-6; mx*=1e-6
+                bounds[k] = (mn, mx)
+            else:
+                bounds[k] = None # No limit
+
+        if not self.use_triplet.get():
+            fixed_params["T"] = True; fixed_params["tau_trip"] = True
+            fit_params["T"] = 0.0
+
         params = {
             'mov_avg': self.ma_win.get(),
             'scan_params': {
@@ -397,38 +489,31 @@ class BatchConfigWindow(tk.Toplevel):
                 'pixel_dwell': self.px_dwell.get() * 1e-6, 
                 'line_time': self.line_time.get() * 1e-3
             },
-            'fit_params': {
-                "D": self.fit_D.get(), "G0": self.fit_G0.get(), 
-                "w0": self.fit_w0.get(), "wz": self.fit_wz.get(),
-                "T": self.fit_T.get(), "tau_trip": self.fit_tau_trip.get() * 1e-6
-            },
-            'fixed_params': {
-                "w0": self.fix_w0.get(), "wz": self.fix_wz.get(), 
-                "T": self.fix_T.get(), "tau_trip": self.fix_tau_trip.get(),
-                "D": False, "G0": False
-            },
-            'triplet_config': {
-                'use': self.use_triplet.get(),
-                'min_T': self.min_T.get(),
-                'max_T': self.max_T.get()
-            },
+            'fit_params': fit_params,
+            'fixed_params': fixed_params,
+            'bounds': bounds, 
             'heatmap': {
                 'win': self.hm_win.get(), 'step': self.hm_step.get(),
                 'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
-                'auto_range': self.auto_range.get(), 'mask': self.mask_outside.get()
+                'auto_range': self.auto_range.get(), 
+                'pad_mode': self.padding_mode_var.get(),
+                'use_arics': self.use_arics_norm_var.get(),
+                'use_exclusion': self.exclude_outer_lag_var.get(),
+                'mask': True
             },
             'roi': roi_param, 
             'output': {
                 'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(), 
                 'max': self.hm_max.get(), 'interp': self.hm_interp.get()
-            }
+            },
+            'use_triplet': self.use_triplet.get()
         }
         self.execute_callback(self.file_list, params)
         self.destroy()
 
 
 # =============================================================================
-# ★ ROI Analysis Window Class
+# ★ ROI Analysis Window Class (Unchanged)
 # =============================================================================
 class ROIAnalysisWindow(tk.Toplevel):
     def __init__(self, master):
@@ -566,7 +651,6 @@ class ROIAnalysisWindow(tk.Toplevel):
     def refresh_plot(self):
         self.fig.clf()
         mode = self.view_mode.get()
-        
         def plot_map(ax, data, title, is_heatmap=False):
             if is_heatmap:
                 masked_map = np.ma.masked_invalid(data)
@@ -584,10 +668,8 @@ class ROIAnalysisWindow(tk.Toplevel):
             if self.roi_verts is not None:
                 poly = patches.Polygon(self.roi_verts, closed=True, linewidth=2, edgecolor='red', facecolor='none')
                 ax.add_patch(poly)
-
         if mode == "both":
-            ax1 = self.fig.add_subplot(121)
-            ax2 = self.fig.add_subplot(122)
+            ax1 = self.fig.add_subplot(121); ax2 = self.fig.add_subplot(122)
             if self.ref_image is not None: plot_map(ax1, self.ref_image, "Reference")
             else: ax1.text(0.5, 0.5, "No Ref Image", ha='center')
             if self.diff_map is not None: plot_map(ax2, self.diff_map, "Heatmap", True)
@@ -642,12 +724,9 @@ class ROIAnalysisWindow(tk.Toplevel):
         else:
             target = self.diff_map
             title = "Hist (Full)"
-        
         valid = target[np.isfinite(target)]
         if len(valid) == 0: return
-        
         hr = (self.hist_min.get(), self.hist_max.get()) if self.hist_use_range.get() else None
-        
         hw = tk.Toplevel(self); hw.title(title)
         fig = plt.Figure(figsize=(6, 4), dpi=100); ax = fig.add_subplot(111)
         ax.hist(valid, bins=self.hist_bins.get(), range=hr, color='skyblue', edgecolor='black')
@@ -660,22 +739,17 @@ class ROIAnalysisWindow(tk.Toplevel):
         if not target_dir: return
         csvs = glob.glob(os.path.join(target_dir, "**", "*.csv"), recursive=True)
         if not csvs: return
-        
         bins = self.hist_bins.get()
         rng = (self.hist_min.get(), self.hist_max.get()) if self.hist_use_range.get() else None
         cnt = 0
-        
         for f in csvs:
             try:
                 data = np.loadtxt(f, delimiter=',')
                 valid = data[np.isfinite(data)]
                 if len(valid) == 0: continue
-                
                 sname = os.path.splitext(os.path.basename(f))[0] + "_hist.png"
                 spath = self._get_save_path(os.path.dirname(f), sname)
-                
-                fig = Figure(figsize=(6, 4), dpi=100)
-                ax = fig.add_subplot(111)
+                fig = Figure(figsize=(6, 4), dpi=100); ax = fig.add_subplot(111)
                 ax.hist(valid, bins=bins, range=rng, color='orange', edgecolor='black')
                 ax.set_title(f"{os.path.basename(f)}\nMean:{np.mean(valid):.2f}")
                 FigureCanvasAgg(fig).print_png(spath)
@@ -688,27 +762,20 @@ class ROIAnalysisWindow(tk.Toplevel):
         if not target_dir: return
         csvs = glob.glob(os.path.join(target_dir, "**", "*.csv"), recursive=True)
         if not csvs: return
-        
         cnt = 0
         auto = self.disp_auto.get()
         perc = self.disp_perc.get()
         md = self.disp_max.get()
-        
         for f in csvs:
             try:
                 data = np.loadtxt(f, delimiter=',')
                 valid = data[np.isfinite(data)]
                 if len(valid) == 0: continue
-                
                 sname = os.path.splitext(os.path.basename(f))[0] + "_heatmap_view.png"
                 spath = self._get_save_path(os.path.dirname(f), sname)
-                
-                fig = Figure(figsize=(6, 5), dpi=100)
-                ax = fig.add_subplot(111)
-                
+                fig = Figure(figsize=(6, 5), dpi=100); ax = fig.add_subplot(111)
                 vmin = np.min(valid) if auto else np.min(valid)
                 vmax = np.percentile(valid, perc) if auto else md
-                
                 im = ax.imshow(np.ma.masked_invalid(data), cmap='jet', vmin=vmin, vmax=vmax)
                 fig.colorbar(im, ax=ax)
                 ax.set_title(os.path.basename(f))
@@ -719,12 +786,12 @@ class ROIAnalysisWindow(tk.Toplevel):
 
 
 # =============================================================================
-# ★ Main Application Class (Fixed)
+# ★ Main Application Class (Fixed: reset_to_average & Slideshow & wz display)
 # =============================================================================
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v23.14 (Fixed)")
+        self.root.title("RICS Analysis App v23.20 (Fixed Methods)")
         self.root.geometry("1400x1000")
         
         setup_dock_icon(self.root)
@@ -781,8 +848,9 @@ class RICSApp:
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.auto_range_var = tk.BooleanVar(value=False)
+        self.mask_outside_var = tk.BooleanVar(value=False)
         
-        # ★ ARICS / Masking Variables
+        # ARICS / Masking
         self.padding_mode_var = tk.StringVar(value="mean") 
         self.use_arics_norm_var = tk.BooleanVar(value=False)
         self.exclude_outer_lag_var = tk.BooleanVar(value=True)
@@ -799,28 +867,55 @@ class RICSApp:
         self.frame_info_var = tk.StringVar(value="No Data")
         self.batch_info_var = tk.StringVar(value="Batch: Idle")
         
-        # Triplet Variables
+        # Triplet
         self.use_triplet_var = tk.BooleanVar(value=False)
-        self.fit_T_var = tk.DoubleVar(value=0.05)
-        self.fit_tau_trip_var = tk.DoubleVar(value=5.0)
-        self.fix_T_var = tk.BooleanVar(value=False)
-        self.fix_tau_trip_var = tk.BooleanVar(value=False)
-        self.min_T_var = tk.DoubleVar(value=0.0)
-        self.max_T_var = tk.DoubleVar(value=0.5)
         
         self.drag_lines = {}
         self.dragging_item = None
         self.selector = None
         self.poly_selector = None
         self.press_xy = None
+        
+        # ★ New Param Structure for Single Fit
+        self.fit_vars_single = {}
+        init_v = {"D": 10.0, "G0": 0.01, "w0": cfg.W0, "AR": cfg.WZ / cfg.W0, "y0": 0.0, "T": 0.05, "tau_trip": 5.0}
+        fix_defs = {"w0": True, "AR": True, "y0": False, "T": False, "tau_trip": False, "D": False, "G0": False}
+        
+        for k, v in init_v.items():
+            self.fit_vars_single[k] = {
+                "val": tk.DoubleVar(value=v),
+                "fix": tk.BooleanVar(value=fix_defs.get(k, False)),
+                "use_lim": tk.BooleanVar(value=False),
+                "min": tk.DoubleVar(value=0.0),
+                "max": tk.DoubleVar(value=100.0)
+            }
+            if k=="y0": 
+                self.fit_vars_single[k]["min"].set(-0.1); self.fit_vars_single[k]["max"].set(0.1)
+            if k=="T":
+                self.fit_vars_single[k]["max"].set(1.0)
+            if k=="AR":
+                self.fit_vars_single[k]["max"].set(20.0)
+
+        self.wz_display_var = tk.DoubleVar()
+        self.fit_vars_single["w0"]["val"].trace_add("write", self._update_wz)
+        self.fit_vars_single["AR"]["val"].trace_add("write", self._update_wz)
+        self._update_wz()
 
         self.create_layout()
         self.setup_plots()
 
+    def _update_wz(self, *args):
+        try:
+            w0 = self.fit_vars_single["w0"]["val"].get()
+            ar = self.fit_vars_single["AR"]["val"].get()
+            self.wz_display_var.set(round(w0 * ar, 5))
+        except:
+            pass
+
     def create_layout(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(main_frame, width=400)
+        self.canvas = tk.Canvas(main_frame, width=450) # width adjusted for new layout
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
         self.scroll_inner = ttk.Frame(self.canvas, padding="10")
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scroll_inner, anchor="nw")
@@ -848,7 +943,6 @@ class RICSApp:
         self.file_label.pack()
         
         batch_frame = ttk.LabelFrame(parent, text="Batch Processing"); batch_frame.pack(fill=tk.X, pady=5)
-        # ★ 追加: バッチ設定ウィンドウを開くボタン
         ttk.Button(batch_frame, text="Open Batch Config Window", command=self.open_batch_window).pack(fill=tk.X, pady=2)
         ttk.Button(batch_frame, text="Open ROI Analysis Tool (Offline)", command=self.open_roi_tool).pack(fill=tk.X, pady=2)
         ttk.Label(batch_frame, textvariable=self.batch_info_var, foreground="red", font=("Arial", 10, "bold"), wraplength=350).pack(anchor="w")
@@ -865,9 +959,9 @@ class RICSApp:
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
         ttk.Label(parent, text="2. Scan Parameters", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         scan_grp = ttk.LabelFrame(parent, text="Microscope Settings"); scan_grp.pack(fill=tk.X, pady=5)
-        self._add_entry(scan_grp, "Pixel Size (nm):", self.pixel_size_var)
-        self._add_entry(scan_grp, "Pixel Dwell (us):", self.pixel_dwell_var)
-        self._add_entry(scan_grp, "Line Time (ms):", self.line_time_var)
+        self._add_simple_entry(scan_grp, "Pixel Size (nm):", self.pixel_size_var)
+        self._add_simple_entry(scan_grp, "Pixel Dwell (us):", self.pixel_dwell_var)
+        self._add_simple_entry(scan_grp, "Line Time (ms):", self.line_time_var)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
         ttk.Label(parent, text="3. ROI & Preprocessing", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
@@ -888,7 +982,6 @@ class RICSApp:
         self._add_roi_entry(roi_grp, "Size W:", self.roi_w_var, " H:", self.roi_h_var)
         self._add_roi_entry(roi_grp, "Center X:", self.roi_cx_var, " Y:", self.roi_cy_var)
         
-        # ★ ARICS / Padding Settings
         pad_grp = ttk.LabelFrame(roi_grp, text="Masking & ARICS Options"); pad_grp.pack(fill=tk.X, padx=5, pady=5)
         p_row = ttk.Frame(pad_grp); p_row.pack(fill=tk.X)
         ttk.Label(p_row, text="Fill Mode: ").pack(side=tk.LEFT)
@@ -908,8 +1001,8 @@ class RICSApp:
         ttk.Entry(omit_frame, textvariable=self.omit_radius_var, width=5).pack(side=tk.LEFT, padx=5)
         range_frame = ttk.LabelFrame(parent, text="Fitting Range"); range_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(range_frame, text="Auto-Detect", variable=self.auto_range_var).pack(anchor="w")
-        self._add_entry(range_frame, "Range X:", self.fit_range_x_var)
-        self._add_entry(range_frame, "Range Y:", self.fit_range_y_var)
+        self._add_simple_entry(range_frame, "Range X:", self.fit_range_x_var)
+        self._add_simple_entry(range_frame, "Range Y:", self.fit_range_y_var)
         self.fit_range_x_var.trace_add("write", lambda *args: self.update_lines_from_entry())
         self.fit_range_y_var.trace_add("write", lambda *args: self.update_lines_from_entry())
         ttk.Button(parent, text="Refresh Plots", command=lambda: self.plot_results(None)).pack(fill=tk.X, pady=2)
@@ -918,32 +1011,35 @@ class RICSApp:
         ttk.Label(parent, text="5. Single Fit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
         fit_grp = ttk.LabelFrame(parent, text="Fit Parameters"); fit_grp.pack(fill=tk.X, pady=5)
-        self.params = { "D": {"val": 10.0, "label": "D"}, "G0": {"val": 0.01, "label": "G0"}, "w0": {"val": cfg.W0, "label": "w0"}, "wz": {"val": cfg.WZ, "label": "wz"} }
-        self.entries = {}; self.checkvars = {}
-        for key, info in self.params.items():
-            row = ttk.Frame(fit_grp); row.pack(fill=tk.X, pady=1)
-            ttk.Label(row, text=info["label"], width=10).pack(side=tk.LEFT)
-            ev = tk.DoubleVar(value=info["val"]); ttk.Entry(row, textvariable=ev, width=8).pack(side=tk.LEFT, padx=5)
-            self.entries[key] = ev
-            cv = tk.BooleanVar(value=True if key in ["w0", "wz"] else False)
-            ttk.Checkbutton(row, text="Fix", variable=cv).pack(side=tk.LEFT); self.checkvars[key] = cv
+        
+        # Helper to add single fit param row
+        def add_s_row(p, l, k):
+            row = ttk.Frame(p); row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=l, width=12).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=self.fit_vars_single[k]["val"], width=6).pack(side=tk.LEFT, padx=2)
+            ttk.Checkbutton(row, text="Fix", variable=self.fit_vars_single[k]["fix"]).pack(side=tk.LEFT, padx=2)
+            ttk.Checkbutton(row, text="Lim", variable=self.fit_vars_single[k]["use_lim"]).pack(side=tk.LEFT, padx=2)
+            ttk.Entry(row, textvariable=self.fit_vars_single[k]["min"], width=4).pack(side=tk.LEFT)
+            ttk.Label(row, text="-").pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=self.fit_vars_single[k]["max"], width=4).pack(side=tk.LEFT)
+
+        add_s_row(fit_grp, "D (um2/s):", "D")
+        add_s_row(fit_grp, "G0:", "G0")
+        add_s_row(fit_grp, "w0 (um):", "w0")
+        add_s_row(fit_grp, "wz/w0 (AR):", "AR")
+        
+        # wz display (read-only)
+        wz_row = ttk.Frame(fit_grp); wz_row.pack(fill=tk.X, pady=1)
+        ttk.Label(wz_row, text="wz (calc):", width=12).pack(side=tk.LEFT)
+        ttk.Entry(wz_row, textvariable=self.wz_display_var, width=8, state="readonly").pack(side=tk.LEFT, padx=2)
+        
+        add_s_row(fit_grp, "y0 (Offset):", "y0")
 
         tri_frame = ttk.Frame(fit_grp); tri_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(tri_frame, text="Include Triplet", variable=self.use_triplet_var, command=self._toggle_triplet_single).pack(anchor="w")
-        self.triplet_single_container = ttk.Frame(fit_grp); self.triplet_single_container.pack(fill=tk.X)
-        row_t = ttk.Frame(self.triplet_single_container); row_t.pack(fill=tk.X, pady=1)
-        ttk.Label(row_t, text="T (frac):", width=10).pack(side=tk.LEFT)
-        ttk.Entry(row_t, textvariable=self.fit_T_var, width=8).pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(row_t, text="Fix", variable=self.fix_T_var).pack(side=tk.LEFT)
-        row_tr = ttk.Frame(self.triplet_single_container); row_tr.pack(fill=tk.X, pady=1)
-        ttk.Label(row_tr, text="Range:", width=10).pack(side=tk.LEFT)
-        ttk.Entry(row_tr, textvariable=self.min_T_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(row_tr, text="-").pack(side=tk.LEFT)
-        ttk.Entry(row_tr, textvariable=self.max_T_var, width=5).pack(side=tk.LEFT)
-        row_tt = ttk.Frame(self.triplet_single_container); row_tt.pack(fill=tk.X, pady=1)
-        ttk.Label(row_tt, text="tau_T(us):", width=10).pack(side=tk.LEFT)
-        ttk.Entry(row_tt, textvariable=self.fit_tau_trip_var, width=8).pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(row_tt, text="Fix", variable=self.fix_tau_trip_var).pack(side=tk.LEFT)
+        self.triplet_single_container = ttk.Frame(fit_grp)
+        add_s_row(self.triplet_single_container, "T (frac):", "T")
+        add_s_row(self.triplet_single_container, "tau_T (us):", "tau_trip")
         self._toggle_triplet_single()
 
         ttk.Button(parent, text="Run Fitting", command=self.run_fitting).pack(fill=tk.X, pady=5)
@@ -974,9 +1070,9 @@ class RICSApp:
         if self.use_triplet_var.get(): self.triplet_single_container.pack(fill=tk.X)
         else: self.triplet_single_container.pack_forget()
 
-    def _add_entry(self, p, l, v):
-        f = ttk.Frame(p); f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=l, width=15).pack(side=tk.LEFT); ttk.Entry(f, textvariable=v, width=8).pack(side=tk.LEFT, padx=5)
+    def _add_simple_entry(self, parent, label, var):
+        f = ttk.Frame(parent); f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=label, width=15).pack(side=tk.LEFT); ttk.Entry(f, textvariable=var, width=8).pack(side=tk.LEFT, padx=5)
     def _add_roi_entry(self, p, l1, v1, l2, v2):
         f = ttk.Frame(p); f.pack(fill=tk.X, pady=1)
         ttk.Label(f, text=l1).pack(side=tk.LEFT); ttk.Entry(f, textvariable=v1, width=5).pack(side=tk.LEFT)
@@ -1081,27 +1177,53 @@ class RICSApp:
         idx = self.current_frame_idx + 1
         if idx >= self.total_frames: idx = 0
         self.current_frame_idx = idx
-        self.slider.set(idx)
+        self.frame_slider.set(idx)
         self.play_job = self.root.after(100, self._play_loop)
 
     def stop_slideshow(self):
-        self.is_playing = False
-        if self.play_job: self.root.after_cancel(self.play_job); self.play_job = None
+        self.reset_to_average()
 
     def on_slider_change(self, val):
         self.current_frame_idx = int(val); self.quick_update_image()
 
     def quick_update_image(self):
         if self.raw_stack is None: return
-        if self.current_frame_idx == -1: display_img = np.mean(self.raw_stack, axis=0); title = "Average Image (Raw)"
-        else: idx = min(max(0, self.current_frame_idx), self.total_frames-1); display_img = self.raw_stack[idx]; title = f"Frame {idx}/{self.total_frames-1} (Raw)"
-        if len(self.ax_img.images) > 0: self.ax_img.images[0].set_data(display_img); self.ax_img.set_title(f"{title} (Drag ROI)")
-        else: self.ax_img.imshow(display_img, cmap='gray'); self.ax_img.set_title(f"{title} (Drag ROI)"); self.ax_img.axis('off')
-        for artist in self.ax_img.patches + self.ax_img.collections: artist.remove()
-        if self.roi_mask is not None: self.ax_img.contour(self.roi_mask, colors='r', linewidths=2)
+        
+        # ★ スライドショー中は生データをそのまま表示（高速化）
+        if self.is_playing and self.current_frame_idx >= 0:
+            idx = min(max(0, self.current_frame_idx), self.total_frames-1)
+            display_img = self.raw_stack[idx]
+            title = f"Frame {idx} (Raw - Playback)"
         else:
-            x, y, w, h = self.roi_coords
-            if self.show_roi_rect: rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none'); self.ax_img.add_patch(rect)
+            # 通常モード（計算後の結果コンテキストで表示）
+            if self.current_frame_idx == -1:
+                display_img = np.mean(self.raw_stack, axis=0)
+                title = "Average Image (Raw)"
+            else:
+                idx = min(max(0, self.current_frame_idx), self.total_frames-1)
+                display_img = self.raw_stack[idx]
+                title = f"Frame {idx} (Raw)"
+        
+        self.ax_img.clear()
+        self.ax_img.imshow(display_img, cmap='gray')
+        self.ax_img.set_title(f"{title} (Drag ROI)")
+        self.ax_img.axis('off')
+        
+        # プレイ中でなければROI枠などを再描画
+        if not self.is_playing:
+            if self.roi_mask is not None:
+                self.ax_img.contour(self.roi_mask, colors='r', linewidths=2)
+            else:
+                x, y, w, h = self.roi_coords
+                if self.show_roi_rect:
+                    rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
+                    self.ax_img.add_patch(rect)
+            
+            # セレクターの再アクティブ化
+            if self.selector: self.selector.set_active(False)
+            self.selector = RectangleSelector(self.ax_img, self.on_select_roi, useblit=False, button=[1], interactive=True)
+            if self.roi_mode == "rect": self.selector.set_active(True)
+        
         self.canvas_fig.draw()
 
     def on_click(self, event):
@@ -1159,14 +1281,24 @@ class RICSApp:
             self.roi_w_var.set(W); self.roi_h_var.set(H); self.roi_cx_var.set(W//2); self.roi_cy_var.set(H//2)
             self.roi_mask = None; self.show_roi_rect = show_visuals; self.update_processing_and_acf()
 
-    def reset_to_average(self): self.stop_slideshow(); self.current_frame_idx = -1; self.update_processing_and_acf()
+    def reset_to_average(self):
+        self.is_playing = False
+        if self.play_job:
+            self.root.after_cancel(self.play_job)
+            self.play_job = None
+        
+        # Averageモード(-1)に設定
+        self.current_frame_idx = -1
+        
+        # 解析・表示更新（plot_results内で Average Image が表示される）
+        self.update_processing_and_acf()
     
     def detect_monotonic_decay_range(self, data, min_len=3):
         n=len(data); smooth=np.convolve(data,np.ones(3)/3,mode='valid'); diff=np.diff(smooth)
         idx=np.where(diff>0)[0]; return idx[0]+1 if len(idx)>0 else n
 
     # =======================================================
-    # Main Logic & Batch (★ Added/Restored Batch Methods)
+    # Main Logic & Batch
     # =======================================================
     def open_roi_tool(self):
         ROIAnalysisWindow(self.root)
@@ -1218,16 +1350,12 @@ class RICSApp:
                 path = Path(verts)
                 # radius=0.5削除（中心点判定のみ）
                 self.roi_mask = path.contains_points(points).reshape(H, W)
-                
                 xs = [v[0] for v in verts]; ys = [v[1] for v in verts]
                 x1 = int(np.floor(min(xs))); x2 = int(np.ceil(max(xs)))
                 y1 = int(np.floor(min(ys))); y2 = int(np.ceil(max(ys)))
                 x1 = max(0, x1); x2 = min(W, x2)
                 y1 = max(0, y1); y2 = min(H, y2)
-                
                 self.roi_coords = (x1, y1, x2-x1, y2-y1)
-                
-                # GUI変数更新
                 self.roi_w_var.set(x2-x1); self.roi_h_var.set(y2-y1)
                 self.roi_cx_var.set(x1+(x2-x1)//2); self.roi_cy_var.set(y1+(y2-y1)//2)
 
@@ -1253,72 +1381,30 @@ class RICSApp:
         self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Batch Analyzing...")
         with self.live_fit_lock: self.live_fit_data = None
         
-        # Triplet Params
         t_conf = p.get('triplet_config', {})
         self.use_triplet_var.set(t_conf.get('use', False))
         self.min_T_var.set(t_conf.get('min_T', 0.0))
         self.max_T_var.set(t_conf.get('max_T', 0.5))
+        self.min_y0_var.set(t_conf.get('min_y0', -0.1))
+        self.max_y0_var.set(t_conf.get('max_y0', 0.1))
         
-        # New options
-        use_mask = p['heatmap']['mask']
+        h = p['heatmap']
+        pad_mode = h.get('pad_mode', 'mean')
+        use_arics = h.get('use_arics', False)
+        use_exclusion = h.get('use_exclusion', True)
         roi_mask_data = self.roi_mask 
-        pad_mode = "mean" # Default for batch if not specified
-        # If batch params extended to include padding mode, fetch here. For now assume mean/standard.
         
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
-            args=(self.processed_full, self.roi_coords, p['heatmap']['win'], p['heatmap']['step'], 
+            args=(self.processed_full, self.roi_coords, h['win'], h['step'], 
                   p['fit_params'], p['fixed_params'], 
-                  p['heatmap']['omit'], p['heatmap']['rx'], p['heatmap']['ry'], 
-                  p['heatmap']['auto_range'], p['scan_params'], 
-                  pad_mode, roi_mask_data, False, False) # Batch defaults: no ARICS norm, no lag exclusion
+                  h['omit'], h['rx'], h['ry'], 
+                  h['auto_range'], p['scan_params'], 
+                  pad_mode, roi_mask_data, use_arics, use_exclusion, p['bounds'])
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def save_batch_result(self):
-        if self.heatmap_d_map is None: return
-        p = self.batch_params['output']
-        base_path = os.path.splitext(self.current_file_path)[0]
-        
-        save_path = self._get_unique_filepath(base_path + "_heatmap.png")
-        csv_base = os.path.splitext(save_path)[0] 
-        csv_path = csv_base + ".csv"
-        
-        ma_val = self.batch_params['mov_avg']
-        win_val = self.batch_params['heatmap']['win']
-        step_val = self.batch_params['heatmap']['step']
-        info_text = f"Mov.Avg: {ma_val} | Win: {win_val} | Step: {step_val}"
-
-        try:
-            fig_temp = Figure(figsize=(6, 6), dpi=300)
-            canvas = FigureCanvasAgg(fig_temp)
-            ax_temp = fig_temp.add_axes([0.1, 0.15, 0.8, 0.8])
-            display_map = self.heatmap_d_map.copy()
-            valid = display_map[~np.isnan(display_map)]
-            vmin, vmax = None, None
-            if len(valid) > 0:
-                if p['auto']: 
-                    vmin = np.nanmin(valid)
-                    try: vmax = np.nanpercentile(valid, p['perc'])
-                    except: vmax = np.nanmax(valid)
-                else: 
-                    vmin = np.nanmin(valid); vmax = p['max']
-            im = ax_temp.imshow(display_map, cmap='jet', interpolation=p['interp'], vmin=vmin, vmax=vmax)
-            ax_temp.set_title(f"D Map: {os.path.basename(self.current_file_path)}")
-            fig_temp.colorbar(im, ax=ax_temp, label="D (um^2/s)")
-            fig_temp.text(0.5, 0.05, info_text, ha='center', fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
-            
-            fig_temp.savefig(save_path, dpi=300)
-            np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
-            print(f"Saved: {save_path}")
-            
-            fig_temp.clf(); del fig_temp, canvas, display_map
-        except Exception as e: print(f"Save Error: {e}")
-
-    # =======================================================
-    # Main Logic
-    # =======================================================
     def load_data(self):
         filepath = filedialog.askopenfilename(filetypes=[("TIFF files", "*.tif"), ("All files", "*.*")])
         if not filepath: return
@@ -1381,8 +1467,6 @@ class RICSApp:
                 base_crop = self.processed_full[:, vy1:vy2, vx1:vx2]
                 mode = self.padding_mode_var.get()
                 
-                # Check Masking (for single fit & display)
-                # If padding active, apply fill
                 if mode != "none":
                     if self.roi_mask is not None:
                         fill_val = 0.0
@@ -1395,8 +1479,6 @@ class RICSApp:
                         masked_data[:, ~mask_crop] = fill_val
                         self.roi_data[:, oy:oy+(vy2-vy1), ox:ox+(vx2-vx1)] = masked_data
                     else:
-                        # Mask outside var in Rect mode also handled here if we had mask
-                        # Current implementation for rect just takes crop unless we gen mask
                         self.roi_data = base_crop
                 else:
                     self.roi_data = base_crop
@@ -1410,7 +1492,7 @@ class RICSApp:
             else:
                 self.acf_data = calc.calculate_2d_acf(self.roi_data)
                 self.plot_results(fit_data=None)
-                g0 = self.entries["G0"].get()
+                g0 = self.fit_vars_single["G0"]["val"].get()
                 self.n_var.set(f"{1/g0:.2f}" if g0 > 0 else "Inf")
                 self.result_text.set("ACF Updated.")
                 
@@ -1418,19 +1500,36 @@ class RICSApp:
 
     def run_fitting(self):
         if self.acf_data is None: return
-        vals = {k: v.get() for k, v in self.entries.items()}
-        fixed = {k: v.get() for k, v in self.checkvars.items()}
+        vals = {}
+        fixed = {}
+        bounds_min = []
+        bounds_max = []
+        
+        for k, v in self.fit_vars_single.items():
+            val = v["val"].get()
+            if k == "tau_trip": val *= 1e-6
+            vals[k] = val
+            fixed[k] = v["fix"].get()
         
         use_trip = self.use_triplet_var.get()
-        if use_trip:
-            vals["T"] = self.fit_T_var.get()
-            vals["tau_trip"] = self.fit_tau_trip_var.get() * 1e-6
-            fixed["T"] = self.fix_T_var.get()
-            fixed["tau_trip"] = self.fix_tau_trip_var.get()
-        
+        if not use_trip:
+            fixed["T"] = True; fixed["tau_trip"] = True
+            vals["T"] = 0.0
+            
         frees = [k for k in vals if not fixed[k]]
         p0 = [vals[k] for k in frees]
         
+        for k in frees:
+            v_obj = self.fit_vars_single[k]
+            if v_obj["use_lim"].get():
+                mn = v_obj["min"].get()
+                mx = v_obj["max"].get()
+                if k == "tau_trip": mn*=1e-6; mx*=1e-6
+                bounds_min.append(mn); bounds_max.append(mx)
+            else:
+                if k == "y0": bounds_min.append(-np.inf); bounds_max.append(np.inf)
+                else: bounds_min.append(0); bounds_max.append(np.inf)
+
         H, W = self.acf_data.shape
         cy, cx = H // 2, W // 2
         if self.auto_range_var.get():
@@ -1443,17 +1542,11 @@ class RICSApp:
         mask_omit_arr = (X.ravel()**2 + Y.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
         mask_range = (np.abs(X.ravel()) > range_x) | (np.abs(Y.ravel()) > range_y)
         
-        # ★ New Exclusion Logic for Single Fit
-        # Check if shifted position falls outside global mask
         mask_excl = np.zeros_like(ydata_flat, dtype=bool)
         if self.exclude_outer_lag_var.get() and self.roi_mask is not None:
-            # Reconstruct global coordinates check
-            # For single fit, "Center" is effectively the center of the bounding box defined by roi_coords
             rcx = self.roi_cx_var.get()
             rcy = self.roi_cy_var.get()
             MH, MW = self.roi_mask.shape
-            
-            # X.ravel(), Y.ravel() are lags
             for i, (sx, sy) in enumerate(zip(X.ravel(), Y.ravel())):
                 tx = rcx + sx
                 ty = rcy + sy
@@ -1461,41 +1554,38 @@ class RICSApp:
                     if not self.roi_mask[ty, tx]:
                         mask_excl[i] = True
                 else:
-                    mask_excl[i] = True # Out of image bounds is also excluded
+                    mask_excl[i] = True 
 
         mask_valid = ~(mask_omit_arr | mask_range | mask_excl)
         x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
         if len(y_fit) == 0: return
         scan_params = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
         
-        b_min = []; b_max = []
-        for name in frees:
-            if name == "T":
-                b_min.append(self.min_T_var.get()); b_max.append(self.max_T_var.get())
-            else:
-                b_min.append(0); b_max.append(np.inf)
-
         def fit_wrapper(xy, *args):
             p = vals.copy()
             for i, name in enumerate(frees): p[name] = args[i]
-            t = p.get("T", 0.0) if use_trip else 0.0
-            tt = p.get("tau_trip", 0.0) if use_trip else 0.0
-            return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=p["w0"], wz=p["wz"], 
-                                          T=t, tau_trip=tt, use_triplet=use_trip, **scan_params).ravel()
+            
+            w0_curr = p["w0"]
+            wz_curr = w0_curr * p["AR"]
+            
+            t = p.get("T", 0.0)
+            tt = p.get("tau_trip", 0.0)
+            y_offset = p.get("y0", 0.0)
+            return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=w0_curr, wz=wz_curr, 
+                                          T=t, tau_trip=tt, use_triplet=use_trip, y0=y_offset, **scan_params).ravel()
         try:
             if frees:
-                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=(b_min, b_max), maxfev=2000)
+                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=(bounds_min, bounds_max), maxfev=2000)
                 for i, name in enumerate(frees): 
                     val = popt[i]
-                    if name in self.entries: self.entries[name].set(round(val, 5))
-                    elif name == "T": self.fit_T_var.set(round(val, 5))
-                    elif name == "tau_trip": self.fit_tau_trip_var.set(round(val * 1e6, 5))
+                    if name == "tau_trip": self.fit_vars_single[name]["val"].set(round(val * 1e6, 5))
+                    else: self.fit_vars_single[name]["val"].set(round(val, 5))
                     vals[name] = val
             
-            fit_map = model.rics_3d_equation(xdata_flat, D=vals["D"], G0=vals["G0"], w0=vals["w0"], wz=vals["wz"],
-                                             T=vals.get("T",0) if use_trip else 0, 
-                                             tau_trip=vals.get("tau_trip",0) if use_trip else 0,
-                                             use_triplet=use_trip, **scan_params).reshape(H, W)
+            wz_final = vals["w0"] * vals["AR"]
+            fit_map = model.rics_3d_equation(xdata_flat, D=vals["D"], G0=vals["G0"], w0=vals["w0"], wz=wz_final,
+                                             T=vals.get("T",0), tau_trip=vals.get("tau_trip",0),
+                                             use_triplet=use_trip, y0=vals.get("y0",0), **scan_params).reshape(H, W)
             self.plot_results(fit_map)
             g0 = vals["G0"]
             self.n_var.set(f"{1/g0:.2f}" if g0 > 1e-9 else "Inf")
@@ -1505,15 +1595,27 @@ class RICSApp:
     def start_heatmap_thread(self):
         if self.is_batch_running: return
         if self.processed_full is None: messagebox.showwarning("Warning", "Please load data first."); return
-        fp = {k: v.get() for k, v in self.entries.items()}
-        fx = {k: v.get() for k, v in self.checkvars.items()}
         
-        use_t = self.use_triplet_var.get()
-        if use_t:
-            fp["T"] = self.fit_T_var.get()
-            fp["tau_trip"] = self.fit_tau_trip_var.get() * 1e-6
-            fx["T"] = self.fix_T_var.get()
-            fx["tau_trip"] = self.fix_tau_trip_var.get()
+        fp = {}
+        fx = {}
+        bounds = {}
+        
+        for k, v in self.fit_vars_single.items():
+            val = v["val"].get()
+            if k == "tau_trip": val *= 1e-6
+            fp[k] = val
+            fx[k] = v["fix"].get()
+            
+            if v["use_lim"].get():
+                mn = v["min"].get(); mx = v["max"].get()
+                if k == "tau_trip": mn*=1e-6; mx*=1e-6
+                bounds[k] = (mn, mx)
+            else:
+                bounds[k] = None
+
+        if not self.use_triplet_var.get():
+            fx["T"] = True; fx["tau_trip"] = True
+            fp["T"] = 0.0
         
         sp = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
         self.stop_event.clear(); self.progress_val.set(0)
@@ -1528,23 +1630,23 @@ class RICSApp:
             target=self.run_heatmap_loop,
             args=(self.processed_full, self.roi_coords, self.hm_window_var.get(), self.hm_step_var.get(),
                   fp, fx, self.omit_radius_var.get(), self.fit_range_x_var.get(), self.fit_range_y_var.get(),
-                  self.auto_range_var.get(), sp, pad_mode, roi_mask_data, use_arics, use_exclusion)
+                  self.auto_range_var.get(), sp, pad_mode, roi_mask_data, use_arics, use_exclusion, bounds)
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
     def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p, 
-                         pad_mode, poly_mask, use_arics, use_exclusion):
+                         pad_mode, poly_mask, use_arics, use_exclusion, bounds_dict):
         
         T, H, W = data.shape
         d_map = np.full((H, W), np.nan)
         roi_x, roi_y, roi_w, roi_h = roi
+        
         frees = [k for k, v in fixed_p.items() if not v]
         base_p0 = [fit_p[k] for k in frees]
         half_w = win // 2 
         
-        use_trip = ("T" in fit_p and "tau_trip" in fit_p)
-        min_t = self.min_T_var.get(); max_t = self.max_T_var.get()
+        use_trip = fit_p.get("T", 0) > 0 # Simple check
         
         from numpy.fft import fft2, ifft2, fftshift
 
@@ -1561,12 +1663,10 @@ class RICSApp:
                 x1 = x - half_w; x2 = x + half_w
                 valid_y1 = max(0, y1); valid_y2 = min(H, y2)
                 valid_x1 = max(0, x1); valid_x2 = min(W, x2)
-                
                 if valid_y2 <= valid_y1 or valid_x2 <= valid_x1: continue
                 
                 valid_data = data[:, valid_y1:valid_y2, valid_x1:valid_x2]
                 
-                # --- Prepare Buffer (Padding) ---
                 fill_val = 0.0
                 if pad_mode == "mean": fill_val = np.mean(valid_data)
                 
@@ -1574,36 +1674,29 @@ class RICSApp:
                 off_y = valid_y1 - y1; off_x = valid_x1 - x1
                 cpy_h = valid_y2 - valid_y1; cpy_w = valid_x2 - valid_x1
                 
-                # --- Apply Mask to Buffer ---
                 local_mask = None
                 if poly_mask is not None and pad_mode != "none":
                     m_sub = poly_mask[valid_y1:valid_y2, valid_x1:valid_x2]
                     local_mask = np.zeros((2*half_w, 2*half_w), dtype=bool)
                     local_mask[off_y:off_y+cpy_h, off_x:off_x+cpy_w] = m_sub
-                    
                     masked_vdata = valid_data.copy()
                     masked_vdata[:, ~m_sub] = fill_val
                     roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = masked_vdata
                 else:
                     roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = valid_data
-                    # If using implicit mask (image boundary) for ARICS or exclusion
                     if pad_mode == "zero" or use_exclusion:
                         local_mask = np.zeros((2*half_w, 2*half_w), dtype=bool)
                         local_mask[off_y:off_y+cpy_h, off_x:off_x+cpy_w] = True
 
                 try:
-                    # --- ACF Calculation ---
                     mean_i = np.mean(roi_img)
                     if mean_i == 0: continue
                     fluct = roi_img - mean_i
                     f_fft = fft2(fluct)
                     spec = np.mean(np.abs(f_fft)**2, axis=0)
                     acf_raw = fftshift(ifft2(spec).real) / (mean_i**2)
-                    
                     final_acf = acf_raw
                     
-                    # --- ARICS Normalization (Optional) ---
-                    # Now possible for Mean Fill too if mask exists
                     if use_arics and local_mask is not None:
                         m_float = local_mask.astype(float)
                         m_fft = fft2(m_float)
@@ -1620,8 +1713,7 @@ class RICSApp:
                     
                     cp0 = list(base_p0)
                     if "G0" in frees:
-                        idx = frees.index("G0")
-                        est = acf[scy, scx]
+                        idx = frees.index("G0"); est = acf[scy, scx]
                         if est > 0: cp0[idx] = est
 
                     sx = np.arange(-scx, scx+(1 if sw%2 else 0))[:sw]
@@ -1635,31 +1727,15 @@ class RICSApp:
                     mo = (SX**2 + SY**2 <= omit**2) if omit > 0 else np.zeros_like(SX, dtype=bool)
                     mr = (np.abs(SX)>crx) | (np.abs(SY)>cry)
                     
-                    # ★ New Logic: Exclude lag if P_shifted is outside Mask/ROI
                     mt = np.zeros_like(SX, dtype=bool)
                     if use_exclusion and local_mask is not None:
-                        # Logic:
-                        # Current Window Center relative to mask: (y, x) -> These are global coords
-                        # Wait, we have local_mask which is the mask cut to this window
-                        # Center of window in local_mask coords is (scy, scx)
-                        # Shifted position: (scy + sy, scx + sx)
-                        # Check if local_mask is True there
-                        
-                        # Note: 'local_mask' is (2*half_w, 2*half_w)
-                        # sx, sy range roughly -half_w to +half_w
-                        # scy, scx are center indices
-                        
                         for i in range(SX.shape[0]):
                             for j in range(SX.shape[1]):
-                                lsx = SX[i, j]
-                                lsy = SY[i, j]
-                                target_y = scy + lsy
-                                target_x = scx + lsx
+                                lsx = SX[i, j]; lsy = SY[i, j]
+                                target_y = scy + lsy; target_x = scx + lsx
                                 if 0 <= target_y < local_mask.shape[0] and 0 <= target_x < local_mask.shape[1]:
-                                    if not local_mask[target_y, target_x]:
-                                        mt[i, j] = True # Exclude
-                                else:
-                                    mt[i, j] = True # Out of window bounds -> Exclude
+                                    if not local_mask[target_y, target_x]: mt[i, j] = True
+                                else: mt[i, j] = True
                         
                     mask = ~(mo | mr | mt)
                     xf = np.vstack((SX.ravel(), SY.ravel()))[:, mask.ravel()]
@@ -1668,16 +1744,20 @@ class RICSApp:
                     
                     b_min = []; b_max = []
                     for n in frees:
-                        if n == "T": b_min.append(min_t); b_max.append(max_t)
-                        else: b_min.append(0); b_max.append(np.inf)
+                        lims = bounds_dict.get(n)
+                        if lims:
+                            b_min.append(lims[0]); b_max.append(lims[1])
+                        else:
+                            if n == "y0": b_min.append(-np.inf); b_max.append(np.inf)
+                            else: b_min.append(0); b_max.append(np.inf)
 
                     def wrap(xy, *a):
                         c = fit_p.copy()
                         for i, n in enumerate(frees): c[n] = a[i]
-                        t = c.get("T", 0) if use_trip else 0
-                        tt = c.get("tau_trip", 0) if use_trip else 0
-                        return model.rics_3d_equation(xy, D=c["D"], G0=c["G0"], w0=c["w0"], wz=c["wz"], 
-                                                      T=t, tau_trip=tt, use_triplet=use_trip, **scan_p).ravel()
+                        w0_c = c["w0"]; wz_c = w0_c * c["AR"]
+                        t = c.get("T", 0); tt = c.get("tau_trip", 0); y0_v = c.get("y0", 0)
+                        return model.rics_3d_equation(xy, D=c["D"], G0=c["G0"], w0=w0_c, wz=wz_c, 
+                                                      T=t, tau_trip=tt, use_triplet=True, y0=y0_v, **scan_p).ravel()
                     
                     if frees:
                         popt, _ = curve_fit(wrap, xf, yf, p0=cp0, bounds=(b_min, b_max), maxfev=2000)
@@ -1688,12 +1768,15 @@ class RICSApp:
                         c = fit_p.copy()
                         if frees:
                             for i, n in enumerate(frees): c[n] = popt[i]
-                        t = c.get("T", 0) if use_trip else 0
-                        tt = c.get("tau_trip", 0) if use_trip else 0
+                        w0_c = c["w0"]; wz_c = w0_c * c["AR"]
+                        t = c.get("T", 0); tt = c.get("tau_trip", 0); y0_v = c.get("y0", 0)
+                        
                         xc = model.rics_3d_equation(np.vstack((sx, np.zeros_like(sx))), 
-                                                    D=c["D"], G0=c["G0"], w0=c["w0"], wz=c["wz"], T=t, tau_trip=tt, use_triplet=use_trip, **scan_p)
+                                                    D=c["D"], G0=c["G0"], w0=w0_c, wz=wz_c, 
+                                                    T=t, tau_trip=tt, use_triplet=True, y0=y0_v, **scan_p)
                         yc = model.rics_3d_equation(np.vstack((np.zeros_like(sy), sy)), 
-                                                    D=c["D"], G0=c["G0"], w0=c["w0"], wz=c["wz"], T=t, tau_trip=tt, use_triplet=use_trip, **scan_p)
+                                                    D=c["D"], G0=c["G0"], w0=w0_c, wz=wz_c, 
+                                                    T=t, tau_trip=tt, use_triplet=True, y0=y0_v, **scan_p)
                         self.live_fit_data = {
                             "sx_axis": sx, "x_slice_vals": acf[scy, :], "x_curve": xc, "range_x": crx,
                             "sy_axis": sy, "y_slice_vals": acf[:, scx], "y_curve": yc, "range_y": cry
@@ -1713,16 +1796,9 @@ class RICSApp:
             self.progress_val.set(100)
             if self.is_batch_running:
                 self.save_batch_result()
-                
-                # メモリ解放
-                self.processed_full = None
-                self.raw_stack = None
-                self.roi_data = None
-                self.heatmap_d_map = None
+                self.processed_full = None; self.raw_stack = None; self.roi_data = None; self.heatmap_d_map = None
                 gc.collect()
-                
-                self.batch_index += 1
-                self.root.after(200, self.process_batch_next)
+                self.batch_index += 1; self.root.after(200, self.process_batch_next)
             else:
                 self.heatmap_status.set("Completed."); self.plot_heatmap_result()
 
