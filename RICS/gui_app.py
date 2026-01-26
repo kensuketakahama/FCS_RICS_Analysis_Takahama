@@ -1536,18 +1536,27 @@ class RICSApp:
             x_profile = self.acf_data[cy, cx:]; rx_new = self.detect_monotonic_decay_range(x_profile)
             y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
             self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
+        
+        # 変数定義 (X_grid, Y_grid)
         X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
-        xdata_flat = np.vstack((X.ravel(), Y.ravel())); ydata_flat = self.acf_data.ravel()
+        
+        # ★修正: X -> X_grid, Y -> Y_grid に変更
+        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel()))
+        ydata_flat = self.acf_data.ravel()
+        
         omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        mask_omit_arr = (X.ravel()**2 + Y.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
-        mask_range = (np.abs(X.ravel()) > range_x) | (np.abs(Y.ravel()) > range_y)
+        
+        # ★修正: ここも X, Y を X_grid, Y_grid に変更
+        mask_omit_arr = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
+        mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
         
         mask_excl = np.zeros_like(ydata_flat, dtype=bool)
         if self.exclude_outer_lag_var.get() and self.roi_mask is not None:
             rcx = self.roi_cx_var.get()
             rcy = self.roi_cy_var.get()
             MH, MW = self.roi_mask.shape
-            for i, (sx, sy) in enumerate(zip(X.ravel(), Y.ravel())):
+            # ★修正: ここも X, Y を X_grid, Y_grid に変更
+            for i, (sx, sy) in enumerate(zip(X_grid.ravel(), Y_grid.ravel())):
                 tx = rcx + sx
                 ty = rcy + sy
                 if 0 <= ty < MH and 0 <= tx < MW:
