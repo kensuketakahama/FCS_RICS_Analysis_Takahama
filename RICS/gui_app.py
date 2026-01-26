@@ -719,12 +719,12 @@ class ROIAnalysisWindow(tk.Toplevel):
 
 
 # =============================================================================
-# ★ Main Application Class
+# ★ Main Application Class (Fixed)
 # =============================================================================
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v23.12 (Triplet & Batch Tools)")
+        self.root.title("RICS Analysis App v23.14 (Fixed)")
         self.root.geometry("1400x1000")
         
         setup_dock_icon(self.root)
@@ -737,7 +737,7 @@ class RICSApp:
         self.current_file_path = None
         
         self.roi_mask = None 
-        self.roi_mode = "rect" # "rect" or "poly"
+        self.roi_mode = "rect" 
         self.roi_verts = None
         self.show_roi_rect = True
         
@@ -781,7 +781,12 @@ class RICSApp:
         self.fit_range_x_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.fit_range_y_var = tk.IntVar(value=cfg.ROI_SIZE // 2)
         self.auto_range_var = tk.BooleanVar(value=False)
-        self.mask_outside_var = tk.BooleanVar(value=False)
+        
+        # ★ ARICS / Masking Variables
+        self.padding_mode_var = tk.StringVar(value="mean") 
+        self.use_arics_norm_var = tk.BooleanVar(value=False)
+        self.exclude_outer_lag_var = tk.BooleanVar(value=True)
+        
         self.hm_window_var = tk.IntVar(value=32)
         self.hm_step_var = tk.IntVar(value=4)
         self.hm_autoscale_var = tk.BooleanVar(value=True)
@@ -794,7 +799,7 @@ class RICSApp:
         self.frame_info_var = tk.StringVar(value="No Data")
         self.batch_info_var = tk.StringVar(value="Batch: Idle")
         
-        # ★ Triplet Variables
+        # Triplet Variables
         self.use_triplet_var = tk.BooleanVar(value=False)
         self.fit_T_var = tk.DoubleVar(value=0.05)
         self.fit_tau_trip_var = tk.DoubleVar(value=5.0)
@@ -843,16 +848,15 @@ class RICSApp:
         self.file_label.pack()
         
         batch_frame = ttk.LabelFrame(parent, text="Batch Processing"); batch_frame.pack(fill=tk.X, pady=5)
+        # ★ 追加: バッチ設定ウィンドウを開くボタン
         ttk.Button(batch_frame, text="Open Batch Config Window", command=self.open_batch_window).pack(fill=tk.X, pady=2)
         ttk.Button(batch_frame, text="Open ROI Analysis Tool (Offline)", command=self.open_roi_tool).pack(fill=tk.X, pady=2)
         ttk.Label(batch_frame, textvariable=self.batch_info_var, foreground="red", font=("Arial", 10, "bold"), wraplength=350).pack(anchor="w")
         
         f_info = ttk.LabelFrame(parent, text="Frame Viewer"); f_info.pack(fill=tk.X, pady=5)
         ttk.Label(f_info, textvariable=self.frame_info_var, foreground="blue").pack(anchor="w")
-        
         self.frame_slider = tk.Scale(f_info, from_=0, to=1, orient=tk.HORIZONTAL, label="Frame Index", command=self.on_slider_change)
         self.frame_slider.pack(fill=tk.X, padx=5); self.frame_slider.configure(state="disabled")
-        
         play_frame = ttk.Frame(f_info); play_frame.pack(fill=tk.X, pady=2)
         ttk.Button(play_frame, text="Play", command=self.start_slideshow, width=8).pack(side=tk.LEFT, padx=2)
         ttk.Button(play_frame, text="Stop", command=self.stop_slideshow, width=8).pack(side=tk.LEFT, padx=2)
@@ -878,14 +882,23 @@ class RICSApp:
         ttk.Button(roi_btns, text="Rect ROI", command=self.use_rect_roi, width=8).pack(side=tk.LEFT, padx=2)
         ttk.Button(roi_btns, text="Draw Poly", command=self.use_poly_roi, width=8).pack(side=tk.LEFT, padx=2)
         ttk.Button(roi_btns, text="Reset", command=self.reset_roi, width=8).pack(side=tk.LEFT, padx=2)
-        
         io_btns = ttk.Frame(roi_grp); io_btns.pack(fill=tk.X, pady=2)
         ttk.Button(io_btns, text="Save ROI", command=self.save_roi).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         ttk.Button(io_btns, text="Load ROI", command=self.load_roi).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-
         self._add_roi_entry(roi_grp, "Size W:", self.roi_w_var, " H:", self.roi_h_var)
         self._add_roi_entry(roi_grp, "Center X:", self.roi_cx_var, " Y:", self.roi_cy_var)
-        ttk.Checkbutton(roi_grp, text="Mask Outside ROI (Mean Fill)", variable=self.mask_outside_var).pack(anchor="w", padx=5)
+        
+        # ★ ARICS / Padding Settings
+        pad_grp = ttk.LabelFrame(roi_grp, text="Masking & ARICS Options"); pad_grp.pack(fill=tk.X, padx=5, pady=5)
+        p_row = ttk.Frame(pad_grp); p_row.pack(fill=tk.X)
+        ttk.Label(p_row, text="Fill Mode: ").pack(side=tk.LEFT)
+        ttk.Radiobutton(p_row, text="Mean Fill", variable=self.padding_mode_var, value="mean").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(p_row, text="Zero Fill", variable=self.padding_mode_var, value="zero").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(p_row, text="None", variable=self.padding_mode_var, value="none").pack(side=tk.LEFT, padx=5)
+        o_row = ttk.Frame(pad_grp); o_row.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(o_row, text="ARICS Norm (Divide by Mask ACF)", variable=self.use_arics_norm_var).pack(anchor="w", padx=5)
+        ttk.Checkbutton(o_row, text="Exclude Lag if Pshifted is out of ROI", variable=self.exclude_outer_lag_var).pack(anchor="w", padx=5)
+
         ttk.Button(parent, text="Update Image & ACF", command=self.update_processing_and_acf).pack(fill=tk.X, pady=5)
 
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
@@ -904,7 +917,6 @@ class RICSApp:
         ttk.Separator(parent, orient="horizontal").pack(fill=tk.X, pady=10)
         ttk.Label(parent, text="5. Single Fit", font=("Arial", 12, "bold")).pack(pady=5, anchor="w")
         
-        # Fit Params
         fit_grp = ttk.LabelFrame(parent, text="Fit Parameters"); fit_grp.pack(fill=tk.X, pady=5)
         self.params = { "D": {"val": 10.0, "label": "D"}, "G0": {"val": 0.01, "label": "G0"}, "w0": {"val": cfg.W0, "label": "w0"}, "wz": {"val": cfg.WZ, "label": "wz"} }
         self.entries = {}; self.checkvars = {}
@@ -916,11 +928,9 @@ class RICSApp:
             cv = tk.BooleanVar(value=True if key in ["w0", "wz"] else False)
             ttk.Checkbutton(row, text="Fix", variable=cv).pack(side=tk.LEFT); self.checkvars[key] = cv
 
-        # ★ Triplet
         tri_frame = ttk.Frame(fit_grp); tri_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(tri_frame, text="Include Triplet", variable=self.use_triplet_var, command=self._toggle_triplet_single).pack(anchor="w")
-        self.triplet_single_container = ttk.Frame(fit_grp)
-        self.triplet_single_container.pack(fill=tk.X)
+        self.triplet_single_container = ttk.Frame(fit_grp); self.triplet_single_container.pack(fill=tk.X)
         row_t = ttk.Frame(self.triplet_single_container); row_t.pack(fill=tk.X, pady=1)
         ttk.Label(row_t, text="T (frac):", width=10).pack(side=tk.LEFT)
         ttk.Entry(row_t, textvariable=self.fit_T_var, width=8).pack(side=tk.LEFT, padx=5)
@@ -1015,6 +1025,7 @@ class RICSApp:
             x1 = max(0, x1); x2 = min(W, x2); y1 = max(0, y1); y2 = min(H, y2)
             w = x2 - x1; h = y2 - y1; cx = x1 + w // 2; cy = y1 + h // 2
             self.roi_w_var.set(w); self.roi_h_var.set(h); self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
+            self.roi_coords = (x1, y1, w, h)
             self.update_processing_and_acf()
         self.poly_selector = PolygonSelector(self.ax_img, on_poly, props=dict(color='cyan', linewidth=2, alpha=0.5))
         self.result_text.set("Draw Polygon on Image...")
@@ -1069,7 +1080,8 @@ class RICSApp:
         if not self.is_playing: return
         idx = self.current_frame_idx + 1
         if idx >= self.total_frames: idx = 0
-        self.frame_slider.set(idx)
+        self.current_frame_idx = idx
+        self.slider.set(idx)
         self.play_job = self.root.after(100, self._play_loop)
 
     def stop_slideshow(self):
@@ -1154,7 +1166,7 @@ class RICSApp:
         idx=np.where(diff>0)[0]; return idx[0]+1 if len(idx)>0 else n
 
     # =======================================================
-    # Main Logic & Batch
+    # Main Logic & Batch (★ Added/Restored Batch Methods)
     # =======================================================
     def open_roi_tool(self):
         ROIAnalysisWindow(self.root)
@@ -1240,8 +1252,6 @@ class RICSApp:
     def start_heatmap_thread_batch(self, p):
         self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Batch Analyzing...")
         with self.live_fit_lock: self.live_fit_data = None
-        use_mask = p['heatmap']['mask']
-        roi_mask_data = self.roi_mask 
         
         # Triplet Params
         t_conf = p.get('triplet_config', {})
@@ -1249,12 +1259,19 @@ class RICSApp:
         self.min_T_var.set(t_conf.get('min_T', 0.0))
         self.max_T_var.set(t_conf.get('max_T', 0.5))
         
+        # New options
+        use_mask = p['heatmap']['mask']
+        roi_mask_data = self.roi_mask 
+        pad_mode = "mean" # Default for batch if not specified
+        # If batch params extended to include padding mode, fetch here. For now assume mean/standard.
+        
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
             args=(self.processed_full, self.roi_coords, p['heatmap']['win'], p['heatmap']['step'], 
                   p['fit_params'], p['fixed_params'], 
                   p['heatmap']['omit'], p['heatmap']['rx'], p['heatmap']['ry'], 
-                  p['heatmap']['auto_range'], p['scan_params'], use_mask, roi_mask_data)
+                  p['heatmap']['auto_range'], p['scan_params'], 
+                  pad_mode, roi_mask_data, False, False) # Batch defaults: no ARICS norm, no lag exclusion
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
@@ -1357,24 +1374,30 @@ class RICSApp:
             
             x_start = cx - roi_w // 2; x_end = x_start + roi_w
             y_start = cy - roi_h // 2; y_end = y_start + roi_h
-            
-            use_mask = self.mask_outside_var.get()
             vx1 = max(0, x_start); vx2 = min(W, x_end)
             vy1 = max(0, y_start); vy2 = min(H, y_end)
             
             if vx2 > vx1 and vy2 > vy1:
                 base_crop = self.processed_full[:, vy1:vy2, vx1:vx2]
-                if use_mask:
-                    mean_val = np.mean(base_crop)
-                    self.roi_data = np.full((self.total_frames, roi_h, roi_w), mean_val, dtype=base_crop.dtype)
-                    oy = vy1 - y_start; ox = vx1 - x_start
+                mode = self.padding_mode_var.get()
+                
+                # Check Masking (for single fit & display)
+                # If padding active, apply fill
+                if mode != "none":
                     if self.roi_mask is not None:
+                        fill_val = 0.0
+                        if mode == "mean": fill_val = np.mean(base_crop)
+                        
+                        self.roi_data = np.full((self.total_frames, roi_h, roi_w), fill_val, dtype=base_crop.dtype)
+                        oy = vy1 - y_start; ox = vx1 - x_start
                         mask_crop = self.roi_mask[vy1:vy2, vx1:vx2]
                         masked_data = base_crop.copy()
-                        masked_data[:, ~mask_crop] = mean_val
+                        masked_data[:, ~mask_crop] = fill_val
                         self.roi_data[:, oy:oy+(vy2-vy1), ox:ox+(vx2-vx1)] = masked_data
                     else:
-                        self.roi_data[:, oy:oy+(vy2-vy1), ox:ox+(vx2-vx1)] = base_crop
+                        # Mask outside var in Rect mode also handled here if we had mask
+                        # Current implementation for rect just takes crop unless we gen mask
+                        self.roi_data = base_crop
                 else:
                     self.roi_data = base_crop
             else:
@@ -1398,7 +1421,6 @@ class RICSApp:
         vals = {k: v.get() for k, v in self.entries.items()}
         fixed = {k: v.get() for k, v in self.checkvars.items()}
         
-        # Triplet Params
         use_trip = self.use_triplet_var.get()
         if use_trip:
             vals["T"] = self.fit_T_var.get()
@@ -1416,24 +1438,42 @@ class RICSApp:
             y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
             self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
         X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
-        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel())); ydata_flat = self.acf_data.ravel()
+        xdata_flat = np.vstack((X.ravel(), Y.ravel())); ydata_flat = self.acf_data.ravel()
         omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        mask_omit_arr = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
-        mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
-        mask_valid = ~(mask_omit_arr | mask_range)
+        mask_omit_arr = (X.ravel()**2 + Y.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
+        mask_range = (np.abs(X.ravel()) > range_x) | (np.abs(Y.ravel()) > range_y)
+        
+        # ★ New Exclusion Logic for Single Fit
+        # Check if shifted position falls outside global mask
+        mask_excl = np.zeros_like(ydata_flat, dtype=bool)
+        if self.exclude_outer_lag_var.get() and self.roi_mask is not None:
+            # Reconstruct global coordinates check
+            # For single fit, "Center" is effectively the center of the bounding box defined by roi_coords
+            rcx = self.roi_cx_var.get()
+            rcy = self.roi_cy_var.get()
+            MH, MW = self.roi_mask.shape
+            
+            # X.ravel(), Y.ravel() are lags
+            for i, (sx, sy) in enumerate(zip(X.ravel(), Y.ravel())):
+                tx = rcx + sx
+                ty = rcy + sy
+                if 0 <= ty < MH and 0 <= tx < MW:
+                    if not self.roi_mask[ty, tx]:
+                        mask_excl[i] = True
+                else:
+                    mask_excl[i] = True # Out of image bounds is also excluded
+
+        mask_valid = ~(mask_omit_arr | mask_range | mask_excl)
         x_fit = xdata_flat[:, mask_valid]; y_fit = ydata_flat[mask_valid]
         if len(y_fit) == 0: return
         scan_params = {'pixel_size': self.pixel_size_var.get()*1e-3, 'pixel_dwell': self.pixel_dwell_var.get()*1e-6, 'line_time': self.line_time_var.get()*1e-3}
         
-        # Bounds
-        bounds_min = []
-        bounds_max = []
+        b_min = []; b_max = []
         for name in frees:
             if name == "T":
-                bounds_min.append(self.min_T_var.get())
-                bounds_max.append(self.max_T_var.get())
+                b_min.append(self.min_T_var.get()); b_max.append(self.max_T_var.get())
             else:
-                bounds_min.append(0); bounds_max.append(np.inf)
+                b_min.append(0); b_max.append(np.inf)
 
         def fit_wrapper(xy, *args):
             p = vals.copy()
@@ -1444,7 +1484,7 @@ class RICSApp:
                                           T=t, tau_trip=tt, use_triplet=use_trip, **scan_params).ravel()
         try:
             if frees:
-                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=(bounds_min, bounds_max), maxfev=2000)
+                popt, _ = curve_fit(fit_wrapper, x_fit, y_fit, p0=p0, bounds=(b_min, b_max), maxfev=2000)
                 for i, name in enumerate(frees): 
                     val = popt[i]
                     if name in self.entries: self.entries[name].set(round(val, 5))
@@ -1479,19 +1519,23 @@ class RICSApp:
         self.stop_event.clear(); self.progress_val.set(0)
         with self.live_fit_lock: self.live_fit_data = None
         
-        use_mask = self.mask_outside_var.get()
+        pad_mode = self.padding_mode_var.get()
+        use_arics = self.use_arics_norm_var.get()
+        use_exclusion = self.exclude_outer_lag_var.get()
         roi_mask_data = self.roi_mask 
         
         self.heatmap_thread = threading.Thread(
             target=self.run_heatmap_loop,
             args=(self.processed_full, self.roi_coords, self.hm_window_var.get(), self.hm_step_var.get(),
                   fp, fx, self.omit_radius_var.get(), self.fit_range_x_var.get(), self.fit_range_y_var.get(),
-                  self.auto_range_var.get(), sp, use_mask, roi_mask_data)
+                  self.auto_range_var.get(), sp, pad_mode, roi_mask_data, use_arics, use_exclusion)
         )
         self.heatmap_thread.daemon = True; self.heatmap_thread.start()
         self.root.after(100, self.monitor_heatmap_thread)
 
-    def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p, use_mask, poly_mask):
+    def run_heatmap_loop(self, data, roi, win, step, fit_p, fixed_p, omit, rx, ry, auto, scan_p, 
+                         pad_mode, poly_mask, use_arics, use_exclusion):
+        
         T, H, W = data.shape
         d_map = np.full((H, W), np.nan)
         roi_x, roi_y, roi_w, roi_h = roi
@@ -1502,6 +1546,8 @@ class RICSApp:
         use_trip = ("T" in fit_p and "tau_trip" in fit_p)
         min_t = self.min_T_var.get(); max_t = self.max_T_var.get()
         
+        from numpy.fft import fft2, ifft2, fftshift
+
         for y in range(roi_y, roi_y+roi_h, step):
             if self.stop_event.is_set(): break
             prog = ((y - roi_y) / roi_h) * 100
@@ -1519,21 +1565,57 @@ class RICSApp:
                 if valid_y2 <= valid_y1 or valid_x2 <= valid_x1: continue
                 
                 valid_data = data[:, valid_y1:valid_y2, valid_x1:valid_x2]
-                mean_val = np.mean(valid_data)
-                roi_img = np.full((T, 2*half_w, 2*half_w), mean_val, dtype=data.dtype)
+                
+                # --- Prepare Buffer (Padding) ---
+                fill_val = 0.0
+                if pad_mode == "mean": fill_val = np.mean(valid_data)
+                
+                roi_img = np.full((T, 2*half_w, 2*half_w), fill_val, dtype=data.dtype)
                 off_y = valid_y1 - y1; off_x = valid_x1 - x1
                 cpy_h = valid_y2 - valid_y1; cpy_w = valid_x2 - valid_x1
                 
-                if use_mask and poly_mask is not None:
+                # --- Apply Mask to Buffer ---
+                local_mask = None
+                if poly_mask is not None and pad_mode != "none":
                     m_sub = poly_mask[valid_y1:valid_y2, valid_x1:valid_x2]
+                    local_mask = np.zeros((2*half_w, 2*half_w), dtype=bool)
+                    local_mask[off_y:off_y+cpy_h, off_x:off_x+cpy_w] = m_sub
+                    
                     masked_vdata = valid_data.copy()
-                    masked_vdata[:, ~m_sub] = mean_val
+                    masked_vdata[:, ~m_sub] = fill_val
                     roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = masked_vdata
                 else:
                     roi_img[:, off_y:off_y+cpy_h, off_x:off_x+cpy_w] = valid_data
+                    # If using implicit mask (image boundary) for ARICS or exclusion
+                    if pad_mode == "zero" or use_exclusion:
+                        local_mask = np.zeros((2*half_w, 2*half_w), dtype=bool)
+                        local_mask[off_y:off_y+cpy_h, off_x:off_x+cpy_w] = True
 
                 try:
-                    acf = calc.calculate_2d_acf(roi_img)
+                    # --- ACF Calculation ---
+                    mean_i = np.mean(roi_img)
+                    if mean_i == 0: continue
+                    fluct = roi_img - mean_i
+                    f_fft = fft2(fluct)
+                    spec = np.mean(np.abs(f_fft)**2, axis=0)
+                    acf_raw = fftshift(ifft2(spec).real) / (mean_i**2)
+                    
+                    final_acf = acf_raw
+                    
+                    # --- ARICS Normalization (Optional) ---
+                    # Now possible for Mean Fill too if mask exists
+                    if use_arics and local_mask is not None:
+                        m_float = local_mask.astype(float)
+                        m_fft = fft2(m_float)
+                        m_spec = np.abs(m_fft)**2
+                        m_acf = fftshift(ifft2(m_spec).real)
+                        max_overlap = np.max(m_acf)
+                        if max_overlap > 0:
+                            m_acf_norm = m_acf / max_overlap
+                            m_acf_norm[m_acf_norm < 1e-9] = 1e-9
+                            final_acf = acf_raw / m_acf_norm
+                        
+                    acf = final_acf
                     sh, sw = acf.shape; scy, scx = sh//2, sw//2
                     
                     cp0 = list(base_p0)
@@ -1549,9 +1631,37 @@ class RICSApp:
                     if auto:
                         crx = self.detect_monotonic_decay_range(acf[scy, scx:])
                         cry = self.detect_monotonic_decay_range(acf[scy:, scx])
-                    mask_omit_arr = (SX**2 + SY**2 <= omit**2) if omit > 0 else np.zeros_like(SX, dtype=bool)
-                    mask_range = (np.abs(SX)>crx) | (np.abs(SY)>cry)
-                    mask = ~(mask_omit_arr | mask_range)
+                    
+                    mo = (SX**2 + SY**2 <= omit**2) if omit > 0 else np.zeros_like(SX, dtype=bool)
+                    mr = (np.abs(SX)>crx) | (np.abs(SY)>cry)
+                    
+                    # ★ New Logic: Exclude lag if P_shifted is outside Mask/ROI
+                    mt = np.zeros_like(SX, dtype=bool)
+                    if use_exclusion and local_mask is not None:
+                        # Logic:
+                        # Current Window Center relative to mask: (y, x) -> These are global coords
+                        # Wait, we have local_mask which is the mask cut to this window
+                        # Center of window in local_mask coords is (scy, scx)
+                        # Shifted position: (scy + sy, scx + sx)
+                        # Check if local_mask is True there
+                        
+                        # Note: 'local_mask' is (2*half_w, 2*half_w)
+                        # sx, sy range roughly -half_w to +half_w
+                        # scy, scx are center indices
+                        
+                        for i in range(SX.shape[0]):
+                            for j in range(SX.shape[1]):
+                                lsx = SX[i, j]
+                                lsy = SY[i, j]
+                                target_y = scy + lsy
+                                target_x = scx + lsx
+                                if 0 <= target_y < local_mask.shape[0] and 0 <= target_x < local_mask.shape[1]:
+                                    if not local_mask[target_y, target_x]:
+                                        mt[i, j] = True # Exclude
+                                else:
+                                    mt[i, j] = True # Out of window bounds -> Exclude
+                        
+                    mask = ~(mo | mr | mt)
                     xf = np.vstack((SX.ravel(), SY.ravel()))[:, mask.ravel()]
                     yf = acf.ravel()[mask.ravel()]
                     if len(yf) < 5: continue
@@ -1568,6 +1678,7 @@ class RICSApp:
                         tt = c.get("tau_trip", 0) if use_trip else 0
                         return model.rics_3d_equation(xy, D=c["D"], G0=c["G0"], w0=c["w0"], wz=c["wz"], 
                                                       T=t, tau_trip=tt, use_triplet=use_trip, **scan_p).ravel()
+                    
                     if frees:
                         popt, _ = curve_fit(wrap, xf, yf, p0=cp0, bounds=(b_min, b_max), maxfev=2000)
                         if "D" in frees: d_map[y:min(H, y+step), x:min(W, x+step)] = popt[frees.index("D")]
