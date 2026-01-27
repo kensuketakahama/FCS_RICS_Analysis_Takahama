@@ -16,6 +16,8 @@ import threading
 import math
 import glob
 import platform
+import textwrap
+from matplotlib.backends.backend_pdf import PdfPages
 
 # 自作モジュールのインポート
 import config as cfg
@@ -615,6 +617,473 @@ class BatchConfigWindow(tk.Toplevel):
         self.execute_callback(self.file_list, final_params)
 
 # =============================================================================
+# ★ Multi-File Analysis Window (Added: PDF Export with Params & Colorbar)
+# =============================================================================
+class MultiFileAnalysisWindow(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Multi-File Analysis (Parallel View)")
+        self.geometry("1400x900")
+        
+        self.file_items = [] # list of dicts
+        
+        # --- Global Settings ---
+        self.g_min = tk.DoubleVar(value=0.0)
+        self.g_max = tk.DoubleVar(value=50.0)
+        self.g_bins = tk.IntVar(value=50)
+        self.sync_roi = tk.BooleanVar(value=True)
+        self.unified_mode = tk.BooleanVar(value=True) 
+        
+        # View & Layout Settings
+        self.view_mode = tk.StringVar(value="both") # "heatmap", "hist", "both"
+        self.zoom_level = tk.IntVar(value=3) # 1(Small) to 5(Large)
+        
+        self.common_roi_mask = None
+        self.common_roi_type = None
+        self.common_roi_coords = None
+        
+        self._create_layout()
+        
+        self.bind("<Configure>", self._on_window_resize)
+        self._resize_timer = None
+
+    def _create_layout(self):
+        # --- Top Control Panel ---
+        top_container = ttk.Frame(self, padding=5, relief="raised")
+        top_container.pack(side=tk.TOP, fill=tk.X)
+        
+        # Row 1: Files, View, Zoom
+        row1 = ttk.Frame(top_container)
+        row1.pack(side=tk.TOP, fill=tk.X, pady=2)
+        
+        # 1. Files & Export
+        f_frame = ttk.LabelFrame(row1, text="1. Files / Export"); f_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        ttk.Button(f_frame, text="Add CSVs", command=self.load_csv_files).pack(side=tk.LEFT, padx=2)
+        ttk.Button(f_frame, text="Load Dir (Rec)", command=self.load_directory_recursive).pack(side=tk.LEFT, padx=2)
+        # ★ ADDED: Save PDF Button
+        ttk.Button(f_frame, text="Save PDF", command=self.save_all_to_pdf).pack(side=tk.LEFT, padx=5)
+        
+        # 2. View Mode
+        v_frame = ttk.LabelFrame(row1, text="2. View Mode"); v_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        ttk.Radiobutton(v_frame, text="Both", variable=self.view_mode, value="both", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(v_frame, text="Heatmap", variable=self.view_mode, value="heatmap", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(v_frame, text="Hist", variable=self.view_mode, value="hist", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
+
+        # 3. Zoom / Layout
+        l_frame = ttk.LabelFrame(row1, text="3. Size (Auto-Fit)"); l_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        ttk.Label(l_frame, text="Small").pack(side=tk.LEFT, padx=2)
+        scl = tk.Scale(l_frame, from_=1, to=5, orient=tk.HORIZONTAL, variable=self.zoom_level, command=lambda v: self.refresh_layout(), showvalue=0)
+        scl.pack(side=tk.LEFT, padx=2, fill=tk.X)
+        ttk.Label(l_frame, text="Large").pack(side=tk.LEFT, padx=2)
+
+        # Row 2: Params, ROI
+        row2 = ttk.Frame(top_container)
+        row2.pack(side=tk.TOP, fill=tk.X, pady=2)
+
+        # 4. Global Params
+        p_frame = ttk.LabelFrame(row2, text="4. Parameters"); p_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        ttk.Checkbutton(p_frame, text="Unified Params", variable=self.unified_mode, command=self.toggle_individual_controls).pack(side=tk.LEFT, padx=10)
+        ttk.Separator(p_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        ttk.Label(p_frame, text="Min:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_min, width=4).pack(side=tk.LEFT)
+        ttk.Label(p_frame, text="Max:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_max, width=4).pack(side=tk.LEFT)
+        ttk.Label(p_frame, text="Bins:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_bins, width=4).pack(side=tk.LEFT)
+        ttk.Button(p_frame, text="Apply All", command=self.apply_global_settings).pack(side=tk.LEFT, padx=5)
+
+        # 5. ROI Controls
+        r_frame = ttk.LabelFrame(row2, text="5. ROI Sync"); r_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        ttk.Checkbutton(r_frame, text="Sync", variable=self.sync_roi).pack(side=tk.LEFT, padx=5)
+        ttk.Button(r_frame, text="Load ROI", command=self.load_roi_global).pack(side=tk.LEFT, padx=2)
+        ttk.Button(r_frame, text="Save ROI", command=self.save_roi_global).pack(side=tk.LEFT, padx=2)
+        ttk.Button(r_frame, text="Reset ROI", command=self.reset_roi_global).pack(side=tk.LEFT, padx=2)
+
+        # --- Scrollable Main Area ---
+        container = ttk.Frame(self)
+        container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        self.canvas = tk.Canvas(container, bg='white')
+        sb_y = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        def _configure_frame(event): self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.scrollable_frame.bind("<Configure>", _configure_frame)
+        
+        def _configure_canvas(event):
+            if event.width > 100: self.canvas.itemconfig(self.canvas_window, width=event.width)
+        self.canvas.bind("<Configure>", _configure_canvas)
+
+        self.canvas.configure(yscrollcommand=sb_y.set)
+        sb_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        def _on_mousewheel(event):
+            if platform.system() == "Darwin": delta = -1 * event.delta
+            else: delta = -1 * (event.delta / 120)
+            self.canvas.yview_scroll(int(delta), "units")
+        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+    # --- PDF Export Method (Fixed: Summary Pages Order & Hist Support) ---
+    def save_all_to_pdf(self):
+        if not self.file_items:
+            messagebox.showinfo("Info", "No files to save.")
+            return
+
+        target_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")],
+            initialfile="analysis_report.pdf", title="Save All to PDF"
+        )
+        if not target_path: return
+
+        # Overwrite protection
+        final_path = self._get_unique_filepath(target_path)
+
+        try:
+            # Get current figure size (inches)
+            w_in = self.file_items[0]['widgets']['fig'].get_figwidth()
+            h_in = self.file_items[0]['widgets']['fig'].get_figheight()
+            
+            # Summary page size (A4 Landscape)
+            sum_w, sum_h = 11.69, 8.27 
+
+            # Global params for consistent summary limits
+            g_mn = self.g_min.get()
+            g_mx = self.g_max.get()
+            g_bn = self.g_bins.get()
+
+            with PdfPages(final_path) as pdf:
+                
+                # --- Internal Helper: Generate Summary Page ---
+                def create_summary_page(plot_type):
+                    n_files = len(self.file_items)
+                    cols = math.ceil(math.sqrt(n_files))
+                    rows = math.ceil(n_files / cols)
+                    
+                    fig_sum = Figure(figsize=(sum_w, sum_h), dpi=100, facecolor='white')
+                    title = "Summary: All Heatmaps" if plot_type == "heatmap" else "Summary: All Histograms"
+                    fig_sum.suptitle(title, fontsize=16, y=0.98)
+                    
+                    # Grid Layout (Heatmap needs space for colorbar, Hist doesn't)
+                    if plot_type == "heatmap":
+                        gs = fig_sum.add_gridspec(rows, cols + 1, width_ratios=[1]*cols + [0.1], wspace=0.4, hspace=0.6)
+                    else:
+                        gs = fig_sum.add_gridspec(rows, cols, wspace=0.4, hspace=0.6)
+                    
+                    last_im = None
+                    
+                    for i, item in enumerate(self.file_items):
+                        r = i // cols
+                        c = i % cols
+                        
+                        if plot_type == "heatmap":
+                            ax = fig_sum.add_subplot(gs[r, c])
+                        else:
+                            ax = fig_sum.add_subplot(gs[r, c])
+                        
+                        # Shorten Title
+                        short_name = textwrap.fill(os.path.basename(item['path']), width=20)
+                        ax.set_title(short_name, fontsize=7)
+                        
+                        data = item['data']
+                        
+                        if plot_type == "heatmap":
+                            masked = np.ma.masked_invalid(data)
+                            last_im = ax.imshow(masked, cmap='jet', vmin=g_mn, vmax=g_mx, aspect='auto', origin='upper')
+                            ax.axis('off')
+                            
+                            mask = item['roi_mask']
+                            if mask is not None:
+                                ax.contour(mask, colors='white', linewidths=0.5)
+                                
+                        elif plot_type == "hist":
+                            # Use ROI data if available
+                            if item['roi_mask'] is not None:
+                                valid_data = data[item['roi_mask']]
+                            else:
+                                valid_data = data
+                            valid_vals = valid_data[np.isfinite(valid_data)]
+                            
+                            # Filter by global range
+                            v_plot = valid_vals[(valid_vals >= g_mn) & (valid_vals <= g_mx)]
+                            
+                            if len(v_plot) > 0:
+                                ax.hist(v_plot, bins=g_bn, color='orange', edgecolor='black', linewidth=0.5)
+                                ax.set_xlim(g_mn, g_mx)
+                                ax.tick_params(axis='both', which='major', labelsize=5)
+                                ax.set_facecolor('white')
+                            else:
+                                ax.text(0.5, 0.5, "No Data", ha='center', fontsize=6)
+                                ax.set_xticks([])
+                                ax.set_yticks([])
+
+                    # Add Colorbar only for Heatmap summary
+                    if plot_type == "heatmap" and last_im:
+                        cax = fig_sum.add_subplot(gs[:, -1])
+                        fig_sum.colorbar(last_im, cax=cax, label="D (um^2/s)")
+                    
+                    pdf.savefig(fig_sum)
+                    plt.close(fig_sum)
+
+                # --- 1. Create Summary Pages based on Mode ---
+                mode = self.view_mode.get()
+                
+                if mode == "both":
+                    create_summary_page("heatmap")
+                    create_summary_page("hist")
+                elif mode == "heatmap":
+                    create_summary_page("heatmap")
+                elif mode == "hist":
+                    create_summary_page("hist")
+
+                # --- 2. Create Individual Pages ---
+                for item in self.file_items:
+                    fig = Figure(figsize=(w_in, h_in), dpi=100, facecolor='white')
+                    
+                    data = item['data']
+                    mn = item['vars']['min'].get()
+                    mx = item['vars']['max'].get()
+                    bn = item['vars']['bins'].get()
+                    
+                    fname = os.path.basename(item['path'])
+                    if mode == "heatmap":
+                        param_str = f"Min:{mn:.1f}, Max:{mx:.1f}"
+                    else:
+                        param_str = f"Min:{mn:.1f}, Max:{mx:.1f}, Bins:{bn}"
+                    
+                    fig.suptitle(f"{fname}\n{param_str}", fontsize=10, y=0.98)
+                    
+                    ax_hm, ax_hist = None, None
+                    
+                    if mode == "both":
+                        gs_ind = fig.add_gridspec(1, 2, width_ratios=[1, 1], wspace=0.2)
+                        ax_hm = fig.add_subplot(gs_ind[0, 0])
+                        ax_hist = fig.add_subplot(gs_ind[0, 1])
+                    elif mode == "heatmap":
+                        ax_hm = fig.add_subplot(111)
+                    elif mode == "hist":
+                        ax_hist = fig.add_subplot(111)
+                    
+                    fig.subplots_adjust(left=0.1, right=0.9, top=0.80, bottom=0.1)
+
+                    # Heatmap
+                    if ax_hm:
+                        masked = np.ma.masked_invalid(data)
+                        im = ax_hm.imshow(masked, cmap='jet', vmin=mn, vmax=mx, aspect='auto', origin='upper')
+                        ax_hm.axis('off')
+                        ax_hm.set_title("Heatmap", fontsize=9)
+                        
+                        mask = item['roi_mask']
+                        if mask is not None:
+                            ax_hm.contour(mask, colors='white', linewidths=1)
+                            rt, rc = item.get('roi_type'), item.get('roi_coords')
+                            if rt == 'rect' and rc:
+                                ax_hm.add_patch(patches.Rectangle((rc[0], rc[1]), rc[2], rc[3], linewidth=1, edgecolor='white', facecolor='none'))
+                            elif rt == 'poly' and rc is not None:
+                                ax_hm.add_patch(patches.Polygon(rc, closed=True, linewidth=1, edgecolor='white', facecolor='none'))
+                        
+                        fig.colorbar(im, ax=ax_hm, fraction=0.046, pad=0.04)
+
+                    # Histogram
+                    if ax_hist:
+                        valid_data = data[item['roi_mask']] if item['roi_mask'] is not None else data
+                        valid_vals = valid_data[np.isfinite(valid_data)]
+                        if len(valid_vals) > 0:
+                            v_plot = valid_vals[(valid_vals >= mn) & (valid_vals <= mx)]
+                            if len(v_plot) > 0:
+                                ax_hist.hist(v_plot, bins=bn, color='orange', edgecolor='black')
+                            ax_hist.set_xlim(mn, mx)
+                            mean_v = np.mean(valid_vals); std_v = np.std(valid_vals)
+                            ax_hist.set_title(f"Hist (M:{mean_v:.1f}, S:{std_v:.1f})", fontsize=9)
+                            ax_hist.tick_params(labelsize=8)
+                        else:
+                            ax_hist.text(0.5, 0.5, "No Data", ha='center')
+
+                    pdf.savefig(fig)
+                    plt.close(fig)
+            
+            messagebox.showinfo("Success", f"Saved PDF to:\n{final_path}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"PDF Save failed: {e}")
+
+    def _get_unique_filepath(self, filepath):
+        if not os.path.exists(filepath): return filepath
+        base, ext = os.path.splitext(filepath)
+        counter = 1
+        while True:
+            new_path = f"{base}_{counter}{ext}"
+            if not os.path.exists(new_path): return new_path
+            counter += 1
+
+    # --- Other Methods (Same as before) ---
+    def _on_window_resize(self, event):
+        if self._resize_timer: self.after_cancel(self._resize_timer)
+        self._resize_timer = self.after(300, self.refresh_layout)
+
+    def load_csv_files(self):
+        filepaths = filedialog.askopenfilenames(filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if not filepaths: return
+        for fp in filepaths: self.add_file_card(fp, draw_now=False)
+        self.refresh_layout()
+
+    def load_directory_recursive(self):
+        target_dir = filedialog.askdirectory()
+        if not target_dir: return
+        files = glob.glob(os.path.join(target_dir, "**", "*.csv"), recursive=True)
+        if not files: messagebox.showinfo("Info", "No CSV files found."); return
+        for fp in sorted(files): self.add_file_card(fp, draw_now=False)
+        self.refresh_layout()
+
+    def add_file_card(self, filepath, draw_now=True):
+        try: data = np.loadtxt(filepath, delimiter=',')
+        except Exception: return
+        p_min = tk.DoubleVar(value=self.g_min.get()); p_max = tk.DoubleVar(value=self.g_max.get()); p_bins = tk.IntVar(value=self.g_bins.get())
+        card = ttk.Frame(self.scrollable_frame, relief="solid", borderwidth=1)
+        head = ttk.Frame(card); head.pack(fill=tk.X, padx=2, pady=1)
+        fname = os.path.basename(filepath); disp_name = fname if len(fname)<25 else fname[:12]+"..."+fname[-8:]
+        ttk.Label(head, text=disp_name, font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+        content = ttk.Frame(card); content.pack(fill=tk.BOTH, expand=True)
+        fig = Figure(dpi=100, facecolor='white'); fig.patch.set_alpha(1.0)
+        canvas_widget = FigureCanvasTkAgg(fig, master=content)
+        canvas_widget.get_tk_widget().configure(bg='white')
+        canvas_widget.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ctrl = ttk.Frame(content, padding=2)
+        def make_row(lbl, var):
+            r = ttk.Frame(ctrl); r.pack(fill=tk.X)
+            ttk.Label(r, text=lbl, width=4).pack(side=tk.LEFT); ttk.Entry(r, textvariable=var, width=5).pack(side=tk.LEFT)
+        ttk.Label(ctrl, text="Local", font=("Arial", 8, "bold")).pack()
+        make_row("Min", p_min); make_row("Max", p_max); make_row("Bins", p_bins)
+        item = {'path': filepath, 'data': data, 'roi_mask': None, 'roi_type': None, 'roi_coords': None,
+                'vars': {'min': p_min, 'max': p_max, 'bins': p_bins},
+                'widgets': {'card': card, 'fig': fig, 'canvas': canvas_widget, 'ctrl_frame': ctrl, 'selectors': {'rect': None}},
+                'stats_lbl': None}
+        ttk.Button(ctrl, text="Upd", command=lambda: self.redraw_card(item), width=4).pack(pady=2)
+        s_lbl = ttk.Label(head, text="", font=("Arial", 8), foreground="blue"); s_lbl.pack(side=tk.RIGHT, padx=5); item['stats_lbl'] = s_lbl
+        if self.sync_roi.get() and self.common_roi_mask is not None:
+            if data.shape == self.common_roi_mask.shape:
+                item['roi_mask'] = self.common_roi_mask; item['roi_type'] = self.common_roi_type; item['roi_coords'] = self.common_roi_coords
+        self.file_items.append(item)
+        if not self.unified_mode.get(): ctrl.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
+        if draw_now: self.redraw_card(item)
+
+    def toggle_individual_controls(self):
+        show = not self.unified_mode.get()
+        for item in self.file_items:
+            ctrl = item['widgets']['ctrl_frame']
+            if show: ctrl.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
+            else: ctrl.pack_forget()
+        if not show: self.apply_global_settings()
+        self.refresh_layout()
+
+    def refresh_layout(self):
+        if not self.file_items: return
+        zoom = self.zoom_level.get(); target_w_px = 250 + (zoom - 1) * 120 
+        canvas_w = self.canvas.winfo_width()
+        if canvas_w < 100: canvas_w = 1200
+        cols = int(canvas_w / (target_w_px + 10)); cols = max(1, cols)
+        available_w_px = (canvas_w / cols) - 15 
+        if not self.unified_mode.get(): available_w_px -= 100 
+        fig_w_inch = max(2.0, available_w_px / 100.0)
+        mode = self.view_mode.get()
+        if mode == "both": fig_h_inch = fig_w_inch * 0.55 
+        else: fig_h_inch = fig_w_inch * 0.95 
+        if fig_h_inch < 2.0: fig_h_inch = 2.0
+        final_w_px = int(fig_w_inch * 100); final_h_px = int(fig_h_inch * 100)
+        for i, item in enumerate(self.file_items):
+            card = item['widgets']['card']; card.grid_forget()
+            r = i // cols; c = i % cols
+            card.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
+            item['widgets']['fig'].set_size_inches(fig_w_inch, fig_h_inch)
+            item['widgets']['canvas'].get_tk_widget().configure(width=final_w_px, height=final_h_px)
+            self.redraw_card(item)
+        for c in range(cols): self.scrollable_frame.columnconfigure(c, weight=1)
+
+    def apply_global_settings(self):
+        gm, gx, gb = self.g_min.get(), self.g_max.get(), self.g_bins.get()
+        for item in self.file_items:
+            item['vars']['min'].set(gm); item['vars']['max'].set(gx); item['vars']['bins'].set(gb)
+            self.redraw_card(item)
+
+    def redraw_card(self, item):
+        old_sel = item['widgets']['selectors'].get('rect')
+        if old_sel: old_sel.disconnect_events(); item['widgets']['selectors']['rect'] = None
+        fig = item['widgets']['fig']; fig.clear(); fig.set_facecolor('white'); fig.patch.set_alpha(1.0)
+        mode = self.view_mode.get(); data = item['data']
+        mn = item['vars']['min'].get(); mx = item['vars']['max'].get(); bn = item['vars']['bins'].get()
+        ax_hm, ax_hist = None, None
+        if mode == "both":
+            ax_hm = fig.add_axes([0.02, 0.05, 0.46, 0.9])
+            ax_hist = fig.add_axes([0.52, 0.05, 0.46, 0.9])
+        elif mode == "heatmap": ax_hm = fig.add_axes([0.02, 0.05, 0.96, 0.9])
+        elif mode == "hist": ax_hist = fig.add_axes([0.05, 0.05, 0.9, 0.9])
+        
+        if ax_hm:
+            masked = np.ma.masked_invalid(data)
+            im = ax_hm.imshow(masked, cmap='jet', vmin=mn, vmax=mx, aspect='auto', origin='upper')
+            ax_hm.axis('off'); ax_hm.set_facecolor('white')
+            mask = item['roi_mask']
+            if mask is not None:
+                ax_hm.contour(mask, colors='white', linewidths=1)
+                rt, rc = item.get('roi_type'), item.get('roi_coords')
+                if rt == 'rect' and rc: ax_hm.add_patch(patches.Rectangle((rc[0], rc[1]), rc[2], rc[3], linewidth=1, edgecolor='white', facecolor='none'))
+                elif rt == 'poly' and rc is not None: ax_hm.add_patch(patches.Polygon(rc, closed=True, linewidth=1, edgecolor='white', facecolor='none'))
+            def on_select(eclick, erelease):
+                x = min(eclick.xdata, erelease.xdata); y = min(eclick.ydata, erelease.ydata)
+                w = abs(eclick.xdata - erelease.xdata); h = abs(eclick.ydata - erelease.ydata)
+                if w<=0 or h<=0: return
+                H, W = data.shape; Y, X = np.ogrid[:H, :W]
+                nm = (X>=x) & (X<x+w) & (Y>=y) & (Y<y+h)
+                self.apply_roi({'mask': nm, 'type': 'rect', 'coords': [x, y, w, h]}, item)
+            item['widgets']['selectors']['rect'] = RectangleSelector(ax_hm, on_select, useblit=False, button=[1], interactive=True, props=dict(facecolor='red', alpha=0.2, fill=True))
+
+        if ax_hist:
+            valid_data = data[item['roi_mask']] if item['roi_mask'] is not None else data
+            valid_vals = valid_data[np.isfinite(valid_data)]
+            if len(valid_vals) > 0:
+                mean_v = np.mean(valid_vals); std_v = np.std(valid_vals)
+                item['stats_lbl'].config(text=f"M:{mean_v:.1f} S:{std_v:.1f}")
+                ax_hist.set_facecolor('white')
+                v_plot = valid_vals[(valid_vals >= mn) & (valid_vals <= mx)]
+                if len(v_plot) > 0: ax_hist.hist(v_plot, bins=bn, color='orange', edgecolor='black')
+                ax_hist.set_xlim(mn, mx); ax_hist.get_yaxis().set_visible(False); ax_hist.tick_params(axis='x', labelsize=7)
+            else: item['stats_lbl'].config(text="NoData")
+        item['widgets']['canvas'].draw()
+
+    def apply_roi(self, info, src_item=None):
+        targets = self.file_items if self.sync_roi.get() else ([src_item] if src_item else [])
+        if self.sync_roi.get(): self.common_roi_mask = info['mask']; self.common_roi_type = info['type']; self.common_roi_coords = info['coords']
+        for it in targets:
+            if it['data'].shape == info['mask'].shape:
+                it['roi_mask'] = info['mask']; it['roi_type'] = info['type']; it['roi_coords'] = info['coords']; self.redraw_card(it)
+
+    def load_roi_global(self):
+        fpath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")]); 
+        if not fpath: return
+        try:
+            with open(fpath, 'r') as f: d = json.load(f)
+            rt, rd = d.get('type'), d.get('data')
+            if not self.file_items: return
+            H, W = self.file_items[0]['data'].shape; mask = np.zeros((H, W), dtype=bool)
+            if rt == 'rect':
+                x, y, w, h = rd; Y, X = np.ogrid[:H, :W]; mask = (X>=x) & (X<x+w) & (Y>=y) & (Y<y+h)
+            elif rt == 'poly':
+                pts = np.vstack((np.mgrid[:H, :W][1].ravel(), np.mgrid[:H, :W][0].ravel())).T
+                mask = Path(rd).contains_points(pts).reshape(H, W)
+            self.apply_roi({'mask': mask, 'type': rt, 'coords': rd})
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def save_roi_global(self):
+        coords = self.common_roi_coords; rtype = self.common_roi_type
+        if not coords and self.file_items: coords = self.file_items[0]['roi_coords']; rtype = self.file_items[0]['roi_type']
+        if not coords: return
+        fpath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if fpath: 
+            with open(fpath, 'w') as f: json.dump({'type': rtype, 'data': coords}, f)
+
+    def reset_roi_global(self):
+        self.common_roi_mask = None; self.common_roi_coords = None; self.common_roi_type = None
+        for it in self.file_items: it['roi_mask'] = None; it['roi_coords'] = None; it['roi_type'] = None; self.redraw_card(it)
+
+# =============================================================================
 # ★ ROI Analysis Window Class (Unchanged)
 # =============================================================================
 class ROIAnalysisWindow(tk.Toplevel):
@@ -1048,6 +1517,7 @@ class RICSApp:
         batch_frame = ttk.LabelFrame(parent, text="Batch Processing"); batch_frame.pack(fill=tk.X, pady=5)
         ttk.Button(batch_frame, text="Open Batch Config Window", command=self.open_batch_window).pack(fill=tk.X, pady=2)
         ttk.Button(batch_frame, text="Open ROI Analysis Tool (Offline)", command=self.open_roi_tool).pack(fill=tk.X, pady=2)
+        ttk.Button(batch_frame, text="Open Multi-File Analysis (CSV)", command=self.open_multi_file_window).pack(fill=tk.X, pady=2)
         ttk.Label(batch_frame, textvariable=self.batch_info_var, foreground="red", font=("Arial", 10, "bold"), wraplength=350).pack(anchor="w")
         
         f_info = ttk.LabelFrame(parent, text="Frame Viewer"); f_info.pack(fill=tk.X, pady=5)
@@ -1408,6 +1878,9 @@ class RICSApp:
         files = sorted(list(set(files)))
         if not files: messagebox.showinfo("Info", "No TIFF files found."); return
         BatchConfigWindow(self.root, files, root_dir, self.start_visual_batch)
+
+    def open_multi_file_window(self):
+        MultiFileAnalysisWindow(self.root)
 
     def start_visual_batch(self, file_list, params):
         self.batch_files = file_list; self.batch_params = params
@@ -1882,7 +2355,7 @@ class RICSApp:
 
     def monitor_heatmap_thread(self):
         self.progress_val.set(self._thread_progress)
-        
+
         try:
             with self.live_fit_lock:
                 if self.live_fit_data:
