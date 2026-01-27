@@ -45,9 +45,8 @@ def setup_dock_icon(root):
 
 disable_app_nap()
 
-
 # =============================================================================
-# ★ Batch Configuration Window Class
+# ★ Batch Configuration Window Class (Fixed: Destroy Order & Recursion)
 # =============================================================================
 class BatchConfigWindow(tk.Toplevel):
     def __init__(self, master, file_list, root_dir, execute_callback):
@@ -74,15 +73,12 @@ class BatchConfigWindow(tk.Toplevel):
         self.px_dwell = tk.DoubleVar(value=getattr(cfg, 'PIXEL_DWELL_TIME', 10e-6) * 1e6)
         self.line_time = tk.DoubleVar(value=getattr(cfg, 'LINE_TIME', 2e-3) * 1000.0)
         
-        # --- Fitting Params (Value, Fix, UseLimit, Min, Max) ---
+        # --- Fitting Params ---
         self.fit_vars = {}
-        
-        # Initial values
         init_vals = {
-            "D": 10.0, "G0": 0.01, "w0": cfg.W0, "AR": cfg.WZ / cfg.W0, # AR = wz/w0
+            "D": 10.0, "G0": 0.01, "w0": cfg.W0, "AR": cfg.WZ / cfg.W0, 
             "y0": 0.0, "T": 0.05, "tau_trip": 5.0
         }
-        # Fixed defaults
         defaults_fix = {"w0": True, "AR": True, "y0": False, "T": False, "tau_trip": False, "D": False, "G0": False}
         
         for k, v in init_vals.items():
@@ -91,9 +87,8 @@ class BatchConfigWindow(tk.Toplevel):
                 "fix": tk.BooleanVar(value=defaults_fix.get(k, False)),
                 "use_lim": tk.BooleanVar(value=False),
                 "min": tk.DoubleVar(value=0.0),
-                "max": tk.DoubleVar(value=100.0) # Default max
+                "max": tk.DoubleVar(value=100.0)
             }
-            # Adjust specific defaults
             if k == "y0": 
                 self.fit_vars[k]["min"].set(-0.1); self.fit_vars[k]["max"].set(0.1)
             if k == "T":
@@ -101,13 +96,11 @@ class BatchConfigWindow(tk.Toplevel):
             if k == "AR":
                 self.fit_vars[k]["max"].set(20.0)
 
-        # Calculated wz for display
+        # wz display
         self.wz_display_var = tk.DoubleVar()
-        self._update_wz() # Init
-        
-        # Add trace to update wz when w0 or AR changes
         self.fit_vars["w0"]["val"].trace_add("write", self._update_wz)
         self.fit_vars["AR"]["val"].trace_add("write", self._update_wz)
+        self._update_wz()
 
         # Triplet Toggle
         self.use_triplet = tk.BooleanVar(value=False)
@@ -120,7 +113,7 @@ class BatchConfigWindow(tk.Toplevel):
         self.range_y = tk.IntVar(value=16)
         self.auto_range = tk.BooleanVar(value=False)
         
-        # Masking & ARICS Options for Batch
+        # Masking & ARICS Options
         self.padding_mode_var = tk.StringVar(value="mean") 
         self.use_arics_norm_var = tk.BooleanVar(value=False)
         self.exclude_outer_lag_var = tk.BooleanVar(value=True)
@@ -131,11 +124,15 @@ class BatchConfigWindow(tk.Toplevel):
         self.hm_max = tk.DoubleVar(value=100.0)
         self.hm_interp = tk.StringVar(value="nearest")
 
+        # --- ROI & Param Management ---
         self.roi_mode_var = tk.StringVar(value="common")
         self.roi_map = {}
         self.common_roi = None
         self.poly_selector = None
         self.selector = None
+        
+        self.param_mode_var = tk.StringVar(value="common")
+        self.param_map = {} 
 
         self._create_layout()
         
@@ -148,18 +145,12 @@ class BatchConfigWindow(tk.Toplevel):
             w0 = self.fit_vars["w0"]["val"].get()
             ar = self.fit_vars["AR"]["val"].get()
             self.wz_display_var.set(round(w0 * ar, 5))
-        except:
-            pass
+        except: pass
 
     def _create_layout(self):
         left_frame = ttk.Frame(self, width=300, padding=5)
         left_frame.pack(side=tk.LEFT, fill=tk.Y)
-        right_frame = ttk.Frame(self, width=450, padding=10) # Wider for params
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y)
-        center_frame = ttk.Frame(self, padding=5)
-        center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # --- Left Frame ---
+        
         ttk.Label(left_frame, text="Files Found:", font=("bold")).pack(anchor="w")
         sb = ttk.Scrollbar(left_frame)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -175,7 +166,43 @@ class BatchConfigWindow(tk.Toplevel):
             self.file_lb.insert(tk.END, rel)
         self.file_lb.bind('<<ListboxSelect>>', self._on_file_select)
 
+        # --- Right Frame (Scrollable) ---
+        right_container = ttk.Frame(self, width=480, padding=5)
+        right_container.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.right_canvas = tk.Canvas(right_container, width=450)
+        right_sb = ttk.Scrollbar(right_container, orient="vertical", command=self.right_canvas.yview)
+        right_frame = ttk.Frame(self.right_canvas)
+        
+        right_frame.bind(
+            "<Configure>",
+            lambda e: self.right_canvas.configure(scrollregion=self.right_canvas.bbox("all"))
+        )
+        
+        self.right_canvas.create_window((0, 0), window=right_frame, anchor="nw")
+        self.right_canvas.configure(yscrollcommand=right_sb.set)
+        
+        right_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        def _on_mousewheel(event):
+            if platform.system() == "Darwin": delta = -1 * event.delta
+            else: delta = -1 * (event.delta / 120)
+            self.right_canvas.yview_scroll(int(delta), "units")
+
+        def _bind_scroll(event):
+            self.right_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        def _unbind_scroll(event):
+            self.right_canvas.unbind_all("<MouseWheel>")
+
+        self.right_canvas.bind("<Enter>", _bind_scroll)
+        self.right_canvas.bind("<Leave>", _unbind_scroll)
+
         # --- Center Frame ---
+        center_frame = ttk.Frame(self, padding=5)
+        center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         roi_ctrl_frame = ttk.LabelFrame(center_frame, text="ROI Settings")
         roi_ctrl_frame.pack(fill=tk.X, pady=5)
         ttk.Radiobutton(roi_ctrl_frame, text="Apply Common ROI", variable=self.roi_mode_var, value="common", command=self._refresh_roi_from_data).pack(anchor="w")
@@ -208,7 +235,14 @@ class BatchConfigWindow(tk.Toplevel):
         self.selector = RectangleSelector(self.ax, self._on_select_roi, useblit=True, button=[1], interactive=True)
         self.selector.set_active(False)
 
-        # --- Right Frame ---
+        # --- Right Frame Contents ---
+        mode_frame = ttk.LabelFrame(right_frame, text="Parameter Mode")
+        mode_frame.pack(fill=tk.X, pady=5)
+        ttk.Radiobutton(mode_frame, text="Apply Common Params (All files)", 
+                        variable=self.param_mode_var, value="common", command=self._on_param_mode_change).pack(anchor="w")
+        ttk.Radiobutton(mode_frame, text="Set Individual Params (Per file)", 
+                        variable=self.param_mode_var, value="individual", command=self._on_param_mode_change).pack(anchor="w")
+
         p_grp = ttk.LabelFrame(right_frame, text="1. Scan Settings")
         p_grp.pack(fill=tk.X, pady=5)
         self._add_simple_entry(p_grp, "Mov.Avg:", self.ma_win)
@@ -219,20 +253,15 @@ class BatchConfigWindow(tk.Toplevel):
         f_grp = ttk.LabelFrame(right_frame, text="2. Fitting Model")
         f_grp.pack(fill=tk.X, pady=5)
         
-        # Standard Params
         self._add_param_row(f_grp, "D (um2/s):", "D")
         self._add_param_row(f_grp, "G0:", "G0")
         self._add_param_row(f_grp, "w0 (um):", "w0")
         self._add_param_row(f_grp, "wz/w0 (AR):", "AR") 
-        
-        # wz (read-only)
         wz_row = ttk.Frame(f_grp); wz_row.pack(fill=tk.X, pady=1)
         ttk.Label(wz_row, text="wz (calc):", width=12).pack(side=tk.LEFT)
         ttk.Entry(wz_row, textvariable=self.wz_display_var, width=8, state="readonly").pack(side=tk.LEFT, padx=2)
-        
         self._add_param_row(f_grp, "y0 (Offset):", "y0")
         
-        # Triplet Config
         t_frame = ttk.Frame(f_grp); t_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(t_frame, text="Include Triplet", variable=self.use_triplet, command=self._toggle_triplet_ui).pack(anchor="w")
         self.triplet_container = ttk.Frame(f_grp)
@@ -287,13 +316,67 @@ class BatchConfigWindow(tk.Toplevel):
         ttk.Label(row, text="-").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=p["max"], width=4).pack(side=tk.LEFT)
 
+    def _get_current_ui_params(self):
+        f_vars = {}
+        for k, v in self.fit_vars.items():
+            f_vars[k] = {
+                "val": v["val"].get(), "fix": v["fix"].get(),
+                "use_lim": v["use_lim"].get(), "min": v["min"].get(), "max": v["max"].get()
+            }
+        return {
+            "ma_win": self.ma_win.get(),
+            "px_size": self.px_size.get(), "px_dwell": self.px_dwell.get(), "line_time": self.line_time.get(),
+            "fit_vars": f_vars,
+            "use_triplet": self.use_triplet.get(),
+            "hm_win": self.hm_win.get(), "hm_step": self.hm_step.get(),
+            "omit_r": self.omit_r.get(), "range_x": self.range_x.get(), "range_y": self.range_y.get(),
+            "auto_range": self.auto_range.get(),
+            "pad_mode": self.padding_mode_var.get(),
+            "use_arics": self.use_arics_norm_var.get(),
+            "excl_lag": self.exclude_outer_lag_var.get(),
+            "hm_auto": self.hm_autoscale.get(), "hm_perc": self.hm_percentile.get(),
+            "hm_max": self.hm_max.get(), "hm_interp": self.hm_interp.get()
+        }
+
+    def _apply_params_to_ui(self, p):
+        if not p: return
+        self.ma_win.set(p["ma_win"])
+        self.px_size.set(p["px_size"]); self.px_dwell.set(p["px_dwell"]); self.line_time.set(p["line_time"])
+        for k, v in p["fit_vars"].items():
+            if k in self.fit_vars:
+                t = self.fit_vars[k]
+                t["val"].set(v["val"]); t["fix"].set(v["fix"])
+                t["use_lim"].set(v["use_lim"]); t["min"].set(v["min"]); t["max"].set(v["max"])
+        self.use_triplet.set(p["use_triplet"])
+        self.hm_win.set(p["hm_win"]); self.hm_step.set(p["hm_step"])
+        self.omit_r.set(p["omit_r"]); self.range_x.set(p["range_x"]); self.range_y.set(p["range_y"])
+        self.auto_range.set(p["auto_range"])
+        self.padding_mode_var.set(p["pad_mode"])
+        self.use_arics_norm_var.set(p["use_arics"])
+        self.exclude_outer_lag_var.set(p["excl_lag"])
+        self.hm_autoscale.set(p["hm_auto"]); self.hm_percentile.set(p["hm_perc"])
+        self.hm_max.set(p["hm_max"]); self.hm_interp.set(p["hm_interp"])
+        self._toggle_triplet_ui()
+
+    def _on_param_mode_change(self):
+        if self.param_mode_var.get() == "individual":
+            curr = self._get_current_ui_params()
+            if self.current_file_path:
+                self.param_map[self.current_file_path] = curr
+
     def _on_file_select(self, event):
+        prev_file = self.current_file_path
         idx = self.file_lb.curselection()
         if not idx: return
-        fpath = self.file_list[idx[0]]
-        self.current_file_path = fpath
+        new_file = self.file_list[idx[0]]
+        
+        if prev_file and self.param_mode_var.get() == "individual":
+            self.param_map[prev_file] = self._get_current_ui_params()
+        
+        self.current_file_path = new_file
+        
         try:
-            raw = prep.load_tiff(fpath)
+            raw = prep.load_tiff(new_file)
             img = np.squeeze(raw)
             if img.ndim == 2: img = img[np.newaxis, :, :]
             elif img.ndim >= 4:
@@ -304,25 +387,30 @@ class BatchConfigWindow(tk.Toplevel):
             self.show_average()
             self._refresh_roi_from_data()
         except Exception: pass
+        
+        if self.param_mode_var.get() == "individual":
+            if new_file in self.param_map:
+                self._apply_params_to_ui(self.param_map[new_file])
 
     def _on_slider_move(self, val):
         self.current_frame_idx = int(val)
         self.update_preview_image()
 
     def show_average(self):
+        # ★ Fix: No recursive call
+        self.is_playing = False
+        if self.play_job:
+            self.after_cancel(self.play_job)
+            self.play_job = None
         self.current_frame_idx = -1
-        self.stop_slideshow()
         self.update_preview_image()
 
     def update_preview_image(self):
         if self.raw_stack is None: return
-        
-        # Slideshow mode: use raw frame if playing
         if self.is_playing and self.current_frame_idx >= 0:
             idx = min(max(0, self.current_frame_idx), self.total_frames-1)
             self.current_preview_data = self.raw_stack[idx]
             self.lbl_frame.config(text=f"Frame: {idx} (Raw)")
-        # Normal mode: use average or specific frame but normally average
         else:
             if self.current_frame_idx == -1:
                 self.current_preview_data = np.mean(self.raw_stack, axis=0)
@@ -331,7 +419,6 @@ class BatchConfigWindow(tk.Toplevel):
                 idx = min(max(0, self.current_frame_idx), self.total_frames-1)
                 self.current_preview_data = self.raw_stack[idx]
                 self.lbl_frame.config(text=f"Frame: {idx}")
-        
         self._refresh_roi_display()
 
     def start_slideshow(self):
@@ -345,21 +432,15 @@ class BatchConfigWindow(tk.Toplevel):
         idx = self.current_frame_idx + 1
         if idx >= self.total_frames: idx = 0
         self.current_frame_idx = idx
-        
-        # 修正前: self.slider.set(idx)
-        # 修正後: self.frame_slider.set(idx)
-        self.frame_slider.set(idx) 
-        
-        self.play_job = self.root.after(100, self._play_loop)
+        self.slider.set(idx)
+        self.play_job = self.after(100, self._play_loop)
 
     def stop_slideshow(self):
         self.is_playing = False
         if self.play_job:
-            self.root.after_cancel(self.play_job)
+            self.after_cancel(self.play_job)
             self.play_job = None
-        
-        # 停止した時点のフレームを維持して解析・表示更新を行う
-        self.update_processing_and_acf()
+        self.update_preview_image()
 
     def use_rect_roi(self):
         if self.poly_selector: self.poly_selector.set_active(False); self.poly_selector = None
@@ -369,12 +450,10 @@ class BatchConfigWindow(tk.Toplevel):
     def use_poly_roi(self):
         if self.selector: self.selector.set_active(False); self.selector.set_visible(False)
         if self.poly_selector: self.poly_selector.set_active(False); self.poly_selector = None
-        
         if self.current_preview_data is not None:
             self.ax.cla()
             self.ax.imshow(self.current_preview_data, cmap='gray')
             self.canvas.draw()
-        
         def on_poly(verts):
             new_roi = {'type': 'poly', 'data': verts}
             if self.roi_mode_var.get() == "common": self.common_roi = new_roi
@@ -393,22 +472,24 @@ class BatchConfigWindow(tk.Toplevel):
         self._refresh_roi_from_data()
 
     def _refresh_roi_from_data(self):
-        if self.current_preview_data is None: return
-        H, W = self.current_preview_data.shape
         target_roi = None
-        if self.roi_mode_var.get() == "common":
-            if self.common_roi is None: self.common_roi = {'type': 'rect', 'data': [0, 0, W, H]}
-            target_roi = self.common_roi
-        else:
-            if self.current_file_path in self.roi_map: target_roi = self.roi_map[self.current_file_path]
-            else: target_roi = {'type': 'rect', 'data': [0, 0, W, H]}; self.roi_map[self.current_file_path] = target_roi
+        if self.current_preview_data is not None:
+            H, W = self.current_preview_data.shape
+            if self.roi_mode_var.get() == "common":
+                if self.common_roi is None: self.common_roi = {'type': 'rect', 'data': [0, 0, W, H]}
+                target_roi = self.common_roi
+            else:
+                if self.current_file_path in self.roi_map: target_roi = self.roi_map[self.current_file_path]
+                else: target_roi = {'type': 'rect', 'data': [0, 0, W, H]}; self.roi_map[self.current_file_path] = target_roi
         self._draw_roi_on_canvas(target_roi)
 
     def _refresh_roi_display(self): self._refresh_roi_from_data()
 
     def _draw_roi_on_canvas(self, roi_data):
         self.ax.cla()
-        self.ax.imshow(self.current_preview_data, cmap='gray')
+        if self.current_preview_data is not None:
+            self.ax.imshow(self.current_preview_data, cmap='gray')
+        
         self.ax.set_title(f"ROI: {self.roi_mode_var.get()}")
         
         if self.selector: self.selector.set_active(False)
@@ -416,16 +497,16 @@ class BatchConfigWindow(tk.Toplevel):
         
         self.selector = RectangleSelector(self.ax, self._on_select_roi, useblit=True, button=[1], interactive=True)
         
-        if not roi_data: return
-        if roi_data['type'] == 'rect':
-            x, y, w, h = roi_data['data']
-            self.selector.set_active(True)
-            self.selector.extents = (x, x+w, y, y+h)
-        elif roi_data['type'] == 'poly':
-            self.selector.set_active(False)
-            verts = roi_data['data']
-            poly = patches.Polygon(verts, closed=True, linewidth=2, edgecolor='cyan', facecolor='none')
-            self.ax.add_patch(poly)
+        if roi_data and self.current_preview_data is not None:
+            if roi_data['type'] == 'rect':
+                x, y, w, h = roi_data['data']
+                self.selector.set_active(True)
+                self.selector.extents = (x, x+w, y, y+h)
+            elif roi_data['type'] == 'poly':
+                self.selector.set_active(False)
+                verts = roi_data['data']
+                poly = patches.Polygon(verts, closed=True, linewidth=2, edgecolor='cyan', facecolor='none')
+                self.ax.add_patch(poly)
         self.canvas.draw()
 
     def _on_select_roi(self, eclick, erelease):
@@ -435,7 +516,6 @@ class BatchConfigWindow(tk.Toplevel):
         if w<=0 or h<=0: return
         xmin = min(x1, x2); ymin = min(y1, y2)
         new_roi = {'type': 'rect', 'data': [xmin, ymin, w, h]}
-        # ★ 修正: self.roi_mode -> self.roi_mode_var
         if self.roi_mode_var.get() == "common": self.common_roi = new_roi
         else:
             if self.current_file_path: self.roi_map[self.current_file_path] = new_roi
@@ -455,62 +535,84 @@ class BatchConfigWindow(tk.Toplevel):
                 if self.current_file_path: self.roi_map[self.current_file_path] = loaded
             self._refresh_roi_from_data()
 
-    def _on_run(self):
-        roi_param = self.roi_map if self.roi_mode_var.get() == "individual" else self.common_roi
-        if self.roi_mode_var.get() == "common" and self.common_roi is None: return
-        
+    def _convert_ui_params_to_app_format(self, p):
         fit_params = {}
         fixed_params = {}
         bounds = {}
-        
-        for k, v in self.fit_vars.items():
-            val = v["val"].get()
-            if k == "tau_trip": val *= 1e-6 # us -> s
-            
+        for k, v in p["fit_vars"].items():
+            val = v["val"]
+            if k == "tau_trip": val *= 1e-6
             fit_params[k] = val
-            fixed_params[k] = v["fix"].get()
-            
-            if v["use_lim"].get():
-                mn = v["min"].get()
-                mx = v["max"].get()
+            fixed_params[k] = v["fix"]
+            if v["use_lim"]:
+                mn = v["min"]; mx = v["max"]
                 if k == "tau_trip": mn*=1e-6; mx*=1e-6
                 bounds[k] = (mn, mx)
             else:
-                bounds[k] = None # No limit
-
-        if not self.use_triplet.get():
+                bounds[k] = None
+        if not p["use_triplet"]:
             fixed_params["T"] = True; fixed_params["tau_trip"] = True
             fit_params["T"] = 0.0
-
-        params = {
-            'mov_avg': self.ma_win.get(),
+        return {
+            'mov_avg': p["ma_win"],
             'scan_params': {
-                'pixel_size': self.px_size.get() * 1e-3, 
-                'pixel_dwell': self.px_dwell.get() * 1e-6, 
-                'line_time': self.line_time.get() * 1e-3
+                'pixel_size': p["px_size"] * 1e-3, 
+                'pixel_dwell': p["px_dwell"] * 1e-6, 
+                'line_time': p["line_time"] * 1e-3
             },
             'fit_params': fit_params,
             'fixed_params': fixed_params,
             'bounds': bounds, 
             'heatmap': {
-                'win': self.hm_win.get(), 'step': self.hm_step.get(),
-                'omit': self.omit_r.get(), 'rx': self.range_x.get(), 'ry': self.range_y.get(),
-                'auto_range': self.auto_range.get(), 
-                'pad_mode': self.padding_mode_var.get(),
-                'use_arics': self.use_arics_norm_var.get(),
-                'use_exclusion': self.exclude_outer_lag_var.get(),
+                'win': p["hm_win"], 'step': p["hm_step"],
+                'omit': p["omit_r"], 'rx': p["range_x"], 'ry': p["range_y"],
+                'auto_range': p["auto_range"], 
+                'pad_mode': p["pad_mode"],
+                'use_arics': p["use_arics"],
+                'use_exclusion': p["excl_lag"],
                 'mask': True
             },
-            'roi': roi_param, 
             'output': {
-                'auto': self.hm_autoscale.get(), 'perc': self.hm_percentile.get(), 
-                'max': self.hm_max.get(), 'interp': self.hm_interp.get()
+                'auto': p["hm_auto"], 'perc': p["hm_perc"], 
+                'max': p["hm_max"], 'interp': p["hm_interp"]
             },
-            'use_triplet': self.use_triplet.get()
+            'use_triplet': p["use_triplet"],
+            'triplet_config': {'use': p["use_triplet"]}
         }
-        self.execute_callback(self.file_list, params)
-        self.destroy()
 
+    def _on_run(self):
+        roi_param = self.roi_map if self.roi_mode_var.get() == "individual" else self.common_roi
+        if self.roi_mode_var.get() == "common" and self.common_roi is None: return
+        
+        if self.param_mode_var.get() == "individual" and self.current_file_path:
+            self.param_map[self.current_file_path] = self._get_current_ui_params()
+        
+        final_params = {}
+        if self.param_mode_var.get() == "common":
+            ui_p = self._get_current_ui_params()
+            base_config = self._convert_ui_params_to_app_format(ui_p)
+            base_config['roi'] = roi_param
+            final_params = base_config
+        else:
+            current_ui_p = self._get_current_ui_params()
+            per_file_configs = {}
+            for fpath in self.file_list:
+                if fpath in self.param_map:
+                    p_data = self.param_map[fpath]
+                else:
+                    p_data = current_ui_p
+                app_config = self._convert_ui_params_to_app_format(p_data)
+                app_config['roi'] = roi_param
+                per_file_configs[fpath] = app_config
+            
+            final_params = self._convert_ui_params_to_app_format(current_ui_p)
+            final_params['roi'] = roi_param
+            final_params['per_file_configs'] = per_file_configs
+
+        # ★ 修正: ウィンドウを閉じてからコールバックを実行してフリーズ回避
+        self.destroy()
+        self.master.update_idletasks()
+        self.execute_callback(self.file_list, final_params)
 
 # =============================================================================
 # ★ ROI Analysis Window Class (Unchanged)
@@ -784,14 +886,13 @@ class ROIAnalysisWindow(tk.Toplevel):
             except: pass
         messagebox.showinfo("Done", f"{cnt} heatmaps created.")
 
-
 # =============================================================================
-# ★ Main Application Class (Fixed: reset_to_average & Slideshow & wz display)
+# ★ Main Application Class (Fixed: No missing attributes & clean methods)
 # =============================================================================
 class RICSApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("RICS Analysis App v23.20 (Fixed Methods)")
+        self.root.title("RICS Analysis App v23.22 (Batch Fix)")
         self.root.geometry("1400x1000")
         
         setup_dock_icon(self.root)
@@ -818,6 +919,7 @@ class RICSApp:
         self.heatmap_thread = None
         self.stop_event = threading.Event()
         self.progress_val = tk.DoubleVar(value=0.0)
+        self._thread_progress = 0.0
         self.live_fit_data = None 
         self.live_fit_lock = threading.Lock()
         
@@ -876,7 +978,7 @@ class RICSApp:
         self.poly_selector = None
         self.press_xy = None
         
-        # ★ New Param Structure for Single Fit
+        # Fit Params
         self.fit_vars_single = {}
         init_v = {"D": 10.0, "G0": 0.01, "w0": cfg.W0, "AR": cfg.WZ / cfg.W0, "y0": 0.0, "T": 0.05, "tau_trip": 5.0}
         fix_defs = {"w0": True, "AR": True, "y0": False, "T": False, "tau_trip": False, "D": False, "G0": False}
@@ -896,6 +998,7 @@ class RICSApp:
             if k=="AR":
                 self.fit_vars_single[k]["max"].set(20.0)
 
+        # wz display (read-only)
         self.wz_display_var = tk.DoubleVar()
         self.fit_vars_single["w0"]["val"].trace_add("write", self._update_wz)
         self.fit_vars_single["AR"]["val"].trace_add("write", self._update_wz)
@@ -915,7 +1018,7 @@ class RICSApp:
     def create_layout(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(main_frame, width=450) # width adjusted for new layout
+        self.canvas = tk.Canvas(main_frame, width=450)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
         self.scroll_inner = ttk.Frame(self.canvas, padding="10")
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scroll_inner, anchor="nw")
@@ -1012,7 +1115,6 @@ class RICSApp:
         
         fit_grp = ttk.LabelFrame(parent, text="Fit Parameters"); fit_grp.pack(fill=tk.X, pady=5)
         
-        # Helper to add single fit param row
         def add_s_row(p, l, k):
             row = ttk.Frame(p); row.pack(fill=tk.X, pady=1)
             ttk.Label(row, text=l, width=12).pack(side=tk.LEFT)
@@ -1028,7 +1130,6 @@ class RICSApp:
         add_s_row(fit_grp, "w0 (um):", "w0")
         add_s_row(fit_grp, "wz/w0 (AR):", "AR")
         
-        # wz display (read-only)
         wz_row = ttk.Frame(fit_grp); wz_row.pack(fill=tk.X, pady=1)
         ttk.Label(wz_row, text="wz (calc):", width=12).pack(side=tk.LEFT)
         ttk.Entry(wz_row, textvariable=self.wz_display_var, width=8, state="readonly").pack(side=tk.LEFT, padx=2)
@@ -1119,9 +1220,9 @@ class RICSApp:
             x1 = int(np.floor(min(xs))); x2 = int(np.ceil(max(xs)))
             y1 = int(np.floor(min(ys))); y2 = int(np.ceil(max(ys)))
             x1 = max(0, x1); x2 = min(W, x2); y1 = max(0, y1); y2 = min(H, y2)
-            w = x2 - x1; h = y2 - y1; cx = x1 + w // 2; cy = y1 + h // 2
-            self.roi_w_var.set(w); self.roi_h_var.set(h); self.roi_cx_var.set(cx); self.roi_cy_var.set(cy)
-            self.roi_coords = (x1, y1, w, h)
+            self.roi_coords = (x1, y1, x2-x1, y2-y1)
+            self.roi_w_var.set(x2-x1); self.roi_h_var.set(y2-y1)
+            self.roi_cx_var.set(x1+(x2-x1)//2); self.roi_cy_var.set(y1+(y2-y1)//2)
             self.update_processing_and_acf()
         self.poly_selector = PolygonSelector(self.ax_img, on_poly, props=dict(color='cyan', linewidth=2, alpha=0.5))
         self.result_text.set("Draw Polygon on Image...")
@@ -1181,35 +1282,45 @@ class RICSApp:
         self.play_job = self.root.after(100, self._play_loop)
 
     def stop_slideshow(self):
-        self.reset_to_average()
+        """Stop slideshow. Keep current frame displayed."""
+        self.is_playing = False
+        if self.play_job:
+            self.root.after_cancel(self.play_job)
+            self.play_job = None
+        self.update_processing_and_acf()
+
+    def reset_to_average(self):
+        """Stop slideshow and reset to average frame (-1)."""
+        self.is_playing = False
+        if self.play_job:
+            self.root.after_cancel(self.play_job)
+            self.play_job = None
+        self.current_frame_idx = -1
+        self.update_processing_and_acf()
 
     def on_slider_change(self, val):
         self.current_frame_idx = int(val); self.quick_update_image()
 
     def quick_update_image(self):
         if self.raw_stack is None: return
-        
-        # ★ スライドショー中は生データをそのまま表示（高速化）
         if self.is_playing and self.current_frame_idx >= 0:
             idx = min(max(0, self.current_frame_idx), self.total_frames-1)
             display_img = self.raw_stack[idx]
             title = f"Frame {idx} (Raw - Playback)"
         else:
-            # 通常モード（計算後の結果コンテキストで表示）
             if self.current_frame_idx == -1:
-                display_img = np.mean(self.raw_stack, axis=0)
-                title = "Average Image (Raw)"
+                display_img = np.mean(self.processed_full, axis=0) if self.processed_full is not None else np.mean(self.raw_stack, axis=0)
+                title = "Average Image"
             else:
                 idx = min(max(0, self.current_frame_idx), self.total_frames-1)
-                display_img = self.raw_stack[idx]
-                title = f"Frame {idx} (Raw)"
+                display_img = self.processed_full[idx] if self.processed_full is not None else self.raw_stack[idx]
+                title = f"Frame {idx}"
         
         self.ax_img.clear()
         self.ax_img.imshow(display_img, cmap='gray')
         self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
         
-        # プレイ中でなければROI枠などを再描画
         if not self.is_playing:
             if self.roi_mask is not None:
                 self.ax_img.contour(self.roi_mask, colors='r', linewidths=2)
@@ -1218,12 +1329,9 @@ class RICSApp:
                 if self.show_roi_rect:
                     rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
                     self.ax_img.add_patch(rect)
-            
-            # セレクターの再アクティブ化
             if self.selector: self.selector.set_active(False)
             self.selector = RectangleSelector(self.ax_img, self.on_select_roi, useblit=False, button=[1], interactive=True)
             if self.roi_mode == "rect": self.selector.set_active(True)
-        
         self.canvas_fig.draw()
 
     def on_click(self, event):
@@ -1280,18 +1388,6 @@ class RICSApp:
             _, H, W = self.raw_stack.shape
             self.roi_w_var.set(W); self.roi_h_var.set(H); self.roi_cx_var.set(W//2); self.roi_cy_var.set(H//2)
             self.roi_mask = None; self.show_roi_rect = show_visuals; self.update_processing_and_acf()
-
-    def reset_to_average(self):
-        self.is_playing = False
-        if self.play_job:
-            self.root.after_cancel(self.play_job)
-            self.play_job = None
-        
-        # Averageモード(-1)に設定
-        self.current_frame_idx = -1
-        
-        # 解析・表示更新（plot_results内で Average Image が表示される）
-        self.update_processing_and_acf()
     
     def detect_monotonic_decay_range(self, data, min_len=3):
         n=len(data); smooth=np.convolve(data,np.ones(3)/3,mode='valid'); diff=np.diff(smooth)
@@ -1333,28 +1429,38 @@ class RICSApp:
         try:
             self.load_file_internal(fpath)
             p = self.batch_params
+            if 'per_file_configs' in self.batch_params:
+                specific_p = self.batch_params['per_file_configs'].get(fpath)
+                if specific_p:
+                    p = specific_p
+            
             self.ma_window_var.set(p['mov_avg'])
+            
+            # Output settings reflection
+            out_p = p.get('output', {})
+            self.hm_autoscale_var.set(out_p.get('auto', True))
+            self.hm_percentile_var.set(out_p.get('perc', 95.0))
+            self.hm_max_val_var.set(out_p.get('max', 100.0))
+            self.hm_interp_var.set(out_p.get('interp', 'nearest'))
+            
             _, H, W = self.raw_stack.shape
             
-            roi_data_src = p['roi'] 
+            roi_data_src = p.get('roi') 
             current_roi_data = None
-            if isinstance(roi_data_src, dict) and 'type' not in roi_data_src:
-                current_roi_data = roi_data_src.get(fpath)
-            else:
-                current_roi_data = roi_data_src
+            if isinstance(roi_data_src, dict):
+                if 'type' in roi_data_src: current_roi_data = roi_data_src
+                else: current_roi_data = roi_data_src.get(fpath)
 
             if current_roi_data and current_roi_data.get('type') == 'poly':
                 verts = current_roi_data['data']
                 y, x = np.mgrid[:H, :W]
                 points = np.vstack((x.ravel(), y.ravel())).T
                 path = Path(verts)
-                # radius=0.5削除（中心点判定のみ）
                 self.roi_mask = path.contains_points(points).reshape(H, W)
                 xs = [v[0] for v in verts]; ys = [v[1] for v in verts]
                 x1 = int(np.floor(min(xs))); x2 = int(np.ceil(max(xs)))
                 y1 = int(np.floor(min(ys))); y2 = int(np.ceil(max(ys)))
-                x1 = max(0, x1); x2 = min(W, x2)
-                y1 = max(0, y1); y2 = min(H, y2)
+                x1 = max(0, x1); x2 = min(W, x2); y1 = max(0, y1); y2 = min(H, y2)
                 self.roi_coords = (x1, y1, x2-x1, y2-y1)
                 self.roi_w_var.set(x2-x1); self.roi_h_var.set(y2-y1)
                 self.roi_cx_var.set(x1+(x2-x1)//2); self.roi_cy_var.set(y1+(y2-y1)//2)
@@ -1381,13 +1487,7 @@ class RICSApp:
         self.stop_event.clear(); self.progress_val.set(0); self.heatmap_status.set("Batch Analyzing...")
         with self.live_fit_lock: self.live_fit_data = None
         
-        t_conf = p.get('triplet_config', {})
-        self.use_triplet_var.set(t_conf.get('use', False))
-        self.min_T_var.set(t_conf.get('min_T', 0.0))
-        self.max_T_var.set(t_conf.get('max_T', 0.5))
-        self.min_y0_var.set(t_conf.get('min_y0', -0.1))
-        self.max_y0_var.set(t_conf.get('max_y0', 0.1))
-        
+        # ★ Fix: No setting of self.*_var. Just use `p`
         h = p['heatmap']
         pad_mode = h.get('pad_mode', 'mean')
         use_arics = h.get('use_arics', False)
@@ -1537,16 +1637,9 @@ class RICSApp:
             y_profile = self.acf_data[cy:, cx]; ry_new = self.detect_monotonic_decay_range(y_profile)
             self.fit_range_x_var.set(rx_new); self.fit_range_y_var.set(ry_new)
         
-        # 変数定義 (X_grid, Y_grid)
         X_grid, Y_grid = np.meshgrid(np.arange(-cx, cx + (1 if W % 2 else 0))[:W], np.arange(-cy, cy + (1 if H % 2 else 0))[:H])
-        
-        # ★修正: X -> X_grid, Y -> Y_grid に変更
-        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel()))
-        ydata_flat = self.acf_data.ravel()
-        
+        xdata_flat = np.vstack((X_grid.ravel(), Y_grid.ravel())); ydata_flat = self.acf_data.ravel()
         omit_r = self.omit_radius_var.get(); range_x = self.fit_range_x_var.get(); range_y = self.fit_range_y_var.get()
-        
-        # ★修正: ここも X, Y を X_grid, Y_grid に変更
         mask_omit_arr = (X_grid.ravel()**2 + Y_grid.ravel()**2) <= (omit_r**2) if omit_r > 0 else np.zeros_like(ydata_flat, dtype=bool)
         mask_range = (np.abs(X_grid.ravel()) > range_x) | (np.abs(Y_grid.ravel()) > range_y)
         
@@ -1555,7 +1648,6 @@ class RICSApp:
             rcx = self.roi_cx_var.get()
             rcy = self.roi_cy_var.get()
             MH, MW = self.roi_mask.shape
-            # ★修正: ここも X, Y を X_grid, Y_grid に変更
             for i, (sx, sy) in enumerate(zip(X_grid.ravel(), Y_grid.ravel())):
                 tx = rcx + sx
                 ty = rcy + sy
@@ -1573,13 +1665,8 @@ class RICSApp:
         def fit_wrapper(xy, *args):
             p = vals.copy()
             for i, name in enumerate(frees): p[name] = args[i]
-            
-            w0_curr = p["w0"]
-            wz_curr = w0_curr * p["AR"]
-            
-            t = p.get("T", 0.0)
-            tt = p.get("tau_trip", 0.0)
-            y_offset = p.get("y0", 0.0)
+            w0_curr = p["w0"]; wz_curr = w0_curr * p["AR"]
+            t = p.get("T", 0.0); tt = p.get("tau_trip", 0.0); y_offset = p.get("y0", 0.0)
             return model.rics_3d_equation(xy, D=p["D"], G0=p["G0"], w0=w0_curr, wz=wz_curr, 
                                           T=t, tau_trip=tt, use_triplet=use_trip, y0=y_offset, **scan_params).ravel()
         try:
@@ -1662,7 +1749,7 @@ class RICSApp:
         for y in range(roi_y, roi_y+roi_h, step):
             if self.stop_event.is_set(): break
             prog = ((y - roi_y) / roi_h) * 100
-            self.progress_val.set(prog)
+            self._thread_progress = prog
             for x in range(roi_x, roi_x+roi_w, step):
                 if poly_mask is not None:
                     if 0 <= y < H and 0 <= x < W:
@@ -1794,6 +1881,8 @@ class RICSApp:
         self.heatmap_d_map = d_map
 
     def monitor_heatmap_thread(self):
+        self.progress_val.set(self._thread_progress)
+        
         try:
             with self.live_fit_lock:
                 if self.live_fit_data:
@@ -1929,6 +2018,62 @@ class RICSApp:
             try: self.fig.savefig(filepath, dpi=300, format='jpg'); messagebox.showinfo("OK", f"Saved: {filepath}")
             except Exception as e: messagebox.showerror("Error", str(e))
 
+    def save_batch_result(self):
+        """
+        Save heatmap CSV and PNG automatically during batch processing.
+        Uses current GUI variables for display settings (updated by process_batch_next).
+        """
+        if self.heatmap_d_map is None or not self.current_file_path: return
+        
+        try:
+            # 1. パスの生成
+            dirname = os.path.dirname(self.current_file_path)
+            basename = os.path.splitext(os.path.basename(self.current_file_path))[0]
+            
+            csv_path = os.path.join(dirname, f"{basename}_heatmap.csv")
+            png_path = os.path.join(dirname, f"{basename}_heatmap.png")
+            
+            # 2. CSV保存
+            np.savetxt(csv_path, self.heatmap_d_map, delimiter=',')
+            
+            # 3. PNG保存
+            fig = plt.figure(figsize=(6, 6))
+            ax = fig.add_subplot(111)
+            
+            data = self.heatmap_d_map
+            valid = data[~np.isnan(data)]
+            
+            # カラースケール設定（GUI変数を使用）
+            vmin, vmax = None, None
+            if self.hm_autoscale_var.get():
+                if len(valid) > 0:
+                    vmin = np.nanmin(valid)
+                    vmax = np.nanpercentile(valid, self.hm_percentile_var.get())
+            else:
+                if len(valid) > 0:
+                    vmin = np.nanmin(valid)
+                    vmax = self.hm_max_val_var.get()
+            
+            # 描画
+            im = ax.imshow(data, cmap='jet', interpolation=self.hm_interp_var.get(), vmin=vmin, vmax=vmax)
+            fig.colorbar(im, ax=ax, label="D (um^2/s)")
+            ax.set_title(basename)
+            
+            # ROIのオーバーレイ（記録用）
+            if self.roi_mask is not None:
+                ax.contour(self.roi_mask, colors='white', linewidths=1, linestyles='--')
+            elif self.roi_mode == "rect":
+                x, y, w, h = self.roi_coords
+                rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='white', facecolor='none', linestyle='--')
+                ax.add_patch(rect)
+            
+            fig.savefig(png_path, dpi=300)
+            plt.close(fig)
+            print(f"Batch Saved: {basename}")
+            
+        except Exception as e:
+            print(f"Failed to save batch result for {self.current_file_path}: {e}")
+
     def _get_unique_filepath(self, filepath):
         if not os.path.exists(filepath): return filepath
         base, ext = os.path.splitext(filepath)
@@ -1947,8 +2092,6 @@ class RICSApp:
         self.ax_img.imshow(display_img, cmap='gray')
         self.ax_img.set_title(f"{title} (Drag ROI)")
         self.ax_img.axis('off')
-        
-        # Re-initialize selector with useblit=False to prevent slideshow issues
         if self.selector: self.selector.set_active(False)
         self.selector = RectangleSelector(self.ax_img, self.on_select_roi, useblit=False, 
                                           button=[1], minspanx=5, minspany=5, 
@@ -1956,7 +2099,6 @@ class RICSApp:
                                           props=dict(facecolor='lime', edgecolor='lime', alpha=0.2, fill=True))
         if self.roi_mode == "rect": self.selector.set_active(True)
         else: self.selector.set_active(False)
-
         if self.roi_mask is not None:
             self.ax_img.contour(self.roi_mask, colors='r', linewidths=2)
         else:
@@ -1964,7 +2106,6 @@ class RICSApp:
             if self.show_roi_rect:
                 rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='lime', facecolor='none')
                 self.ax_img.add_patch(rect)
-
         H, W = self.acf_data.shape; cy, cx = H // 2, W // 2
         x_axis = np.arange(-cx, cx + (1 if W % 2 else 0))[:W]; y_axis = np.arange(-cy, cy + (1 if H % 2 else 0))[:H]
         X_grid, Y_grid = np.meshgrid(x_axis, y_axis)
