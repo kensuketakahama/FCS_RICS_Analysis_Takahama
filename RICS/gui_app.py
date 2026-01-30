@@ -617,7 +617,7 @@ class BatchConfigWindow(tk.Toplevel):
         self.execute_callback(self.file_list, final_params)
 
 # =============================================================================
-# ★ Multi-File Analysis Window (Added: PDF Export with Params & Colorbar)
+# ★ Multi-File Analysis Window (Fixed: PDF Summary Distortion, Ref Window Square)
 # =============================================================================
 class MultiFileAnalysisWindow(tk.Toplevel):
     def __init__(self, master):
@@ -631,12 +631,13 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         self.g_min = tk.DoubleVar(value=0.0)
         self.g_max = tk.DoubleVar(value=50.0)
         self.g_bins = tk.IntVar(value=50)
+        self.ref_window_px = tk.IntVar(value=32) # ★ Added: Reference Window Size
         self.sync_roi = tk.BooleanVar(value=True)
         self.unified_mode = tk.BooleanVar(value=True) 
         
         # View & Layout Settings
-        self.view_mode = tk.StringVar(value="both") # "heatmap", "hist", "both"
-        self.zoom_level = tk.IntVar(value=3) # 1(Small) to 5(Large)
+        self.view_mode = tk.StringVar(value="both") 
+        self.zoom_level = tk.IntVar(value=3)
         
         self.common_roi_mask = None
         self.common_roi_type = None
@@ -656,20 +657,16 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         row1 = ttk.Frame(top_container)
         row1.pack(side=tk.TOP, fill=tk.X, pady=2)
         
-        # 1. Files & Export
-        f_frame = ttk.LabelFrame(row1, text="1. Files / Export"); f_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
+        f_frame = ttk.LabelFrame(row1, text="1. Files"); f_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
         ttk.Button(f_frame, text="Add CSVs", command=self.load_csv_files).pack(side=tk.LEFT, padx=2)
         ttk.Button(f_frame, text="Load Dir (Rec)", command=self.load_directory_recursive).pack(side=tk.LEFT, padx=2)
-        # ★ ADDED: Save PDF Button
         ttk.Button(f_frame, text="Save PDF", command=self.save_all_to_pdf).pack(side=tk.LEFT, padx=5)
         
-        # 2. View Mode
         v_frame = ttk.LabelFrame(row1, text="2. View Mode"); v_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
         ttk.Radiobutton(v_frame, text="Both", variable=self.view_mode, value="both", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(v_frame, text="Heatmap", variable=self.view_mode, value="heatmap", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(v_frame, text="Hist", variable=self.view_mode, value="hist", command=self.refresh_layout).pack(side=tk.LEFT, padx=2)
 
-        # 3. Zoom / Layout
         l_frame = ttk.LabelFrame(row1, text="3. Size (Auto-Fit)"); l_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
         ttk.Label(l_frame, text="Small").pack(side=tk.LEFT, padx=2)
         scl = tk.Scale(l_frame, from_=1, to=5, orient=tk.HORIZONTAL, variable=self.zoom_level, command=lambda v: self.refresh_layout(), showvalue=0)
@@ -680,16 +677,20 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         row2 = ttk.Frame(top_container)
         row2.pack(side=tk.TOP, fill=tk.X, pady=2)
 
-        # 4. Global Params
         p_frame = ttk.LabelFrame(row2, text="4. Parameters"); p_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
         ttk.Checkbutton(p_frame, text="Unified Params", variable=self.unified_mode, command=self.toggle_individual_controls).pack(side=tk.LEFT, padx=10)
         ttk.Separator(p_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        
         ttk.Label(p_frame, text="Min:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_min, width=4).pack(side=tk.LEFT)
         ttk.Label(p_frame, text="Max:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_max, width=4).pack(side=tk.LEFT)
         ttk.Label(p_frame, text="Bins:").pack(side=tk.LEFT); ttk.Entry(p_frame, textvariable=self.g_bins, width=4).pack(side=tk.LEFT)
+        
+        # ★ Added: Ref Window Size Input
+        ttk.Label(p_frame, text="| RefWin:").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(p_frame, textvariable=self.ref_window_px, width=4).pack(side=tk.LEFT)
+        
         ttk.Button(p_frame, text="Apply All", command=self.apply_global_settings).pack(side=tk.LEFT, padx=5)
 
-        # 5. ROI Controls
         r_frame = ttk.LabelFrame(row2, text="5. ROI Sync"); r_frame.pack(side=tk.LEFT, padx=2, fill=tk.Y)
         ttk.Checkbutton(r_frame, text="Sync", variable=self.sync_roi).pack(side=tk.LEFT, padx=5)
         ttk.Button(r_frame, text="Load ROI", command=self.load_roi_global).pack(side=tk.LEFT, padx=2)
@@ -702,12 +703,12 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         
         self.canvas = tk.Canvas(container, bg='white')
         sb_y = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        
         self.scrollable_frame = ttk.Frame(self.canvas)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         
         def _configure_frame(event): self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.scrollable_frame.bind("<Configure>", _configure_frame)
-        
         def _configure_canvas(event):
             if event.width > 100: self.canvas.itemconfig(self.canvas_window, width=event.width)
         self.canvas.bind("<Configure>", _configure_canvas)
@@ -722,7 +723,7 @@ class MultiFileAnalysisWindow(tk.Toplevel):
             self.canvas.yview_scroll(int(delta), "units")
         self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-    # --- PDF Export Method (Fixed: Summary Pages Order & Hist Support) ---
+    # --- PDF Export Method (Updated) ---
     def save_all_to_pdf(self):
         if not self.file_items:
             messagebox.showinfo("Info", "No files to save.")
@@ -734,25 +735,23 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         )
         if not target_path: return
 
-        # Overwrite protection
         final_path = self._get_unique_filepath(target_path)
 
         try:
-            # Get current figure size (inches)
             w_in = self.file_items[0]['widgets']['fig'].get_figwidth()
             h_in = self.file_items[0]['widgets']['fig'].get_figheight()
-            
-            # Summary page size (A4 Landscape)
             sum_w, sum_h = 11.69, 8.27 
 
-            # Global params for consistent summary limits
             g_mn = self.g_min.get()
             g_mx = self.g_max.get()
             g_bn = self.g_bins.get()
+            
+            # ★ Added: Ref Window Size
+            ref_w_px = self.ref_window_px.get()
 
             with PdfPages(final_path) as pdf:
                 
-                # --- Internal Helper: Generate Summary Page ---
+                # --- Helper: Create Summary Page ---
                 def create_summary_page(plot_type):
                     n_files = len(self.file_items)
                     cols = math.ceil(math.sqrt(n_files))
@@ -762,7 +761,6 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                     title = "Summary: All Heatmaps" if plot_type == "heatmap" else "Summary: All Histograms"
                     fig_sum.suptitle(title, fontsize=16, y=0.98)
                     
-                    # Grid Layout (Heatmap needs space for colorbar, Hist doesn't)
                     if plot_type == "heatmap":
                         gs = fig_sum.add_gridspec(rows, cols + 1, width_ratios=[1]*cols + [0.1], wspace=0.4, hspace=0.6)
                     else:
@@ -773,13 +771,8 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                     for i, item in enumerate(self.file_items):
                         r = i // cols
                         c = i % cols
+                        ax = fig_sum.add_subplot(gs[r, c])
                         
-                        if plot_type == "heatmap":
-                            ax = fig_sum.add_subplot(gs[r, c])
-                        else:
-                            ax = fig_sum.add_subplot(gs[r, c])
-                        
-                        # Shorten Title
                         short_name = textwrap.fill(os.path.basename(item['path']), width=20)
                         ax.set_title(short_name, fontsize=7)
                         
@@ -787,22 +780,23 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                         
                         if plot_type == "heatmap":
                             masked = np.ma.masked_invalid(data)
-                            last_im = ax.imshow(masked, cmap='jet', vmin=g_mn, vmax=g_mx, aspect='auto', origin='upper')
+                            # ★ Fixed: aspect='equal' to prevent distortion in summary
+                            last_im = ax.imshow(masked, cmap='jet', vmin=g_mn, vmax=g_mx, aspect='equal', origin='upper')
                             ax.axis('off')
                             
                             mask = item['roi_mask']
                             if mask is not None:
                                 ax.contour(mask, colors='white', linewidths=0.5)
+                            
+                            # ★ Added: Ref Window Square
+                            if ref_w_px > 0:
+                                rect = patches.Rectangle((0, 0), ref_w_px, ref_w_px, linewidth=1, edgecolor='cyan', facecolor='none')
+                                ax.add_patch(rect)
                                 
                         elif plot_type == "hist":
-                            # Use ROI data if available
-                            if item['roi_mask'] is not None:
-                                valid_data = data[item['roi_mask']]
-                            else:
-                                valid_data = data
+                            if item['roi_mask'] is not None: valid_data = data[item['roi_mask']]
+                            else: valid_data = data
                             valid_vals = valid_data[np.isfinite(valid_data)]
-                            
-                            # Filter by global range
                             v_plot = valid_vals[(valid_vals >= g_mn) & (valid_vals <= g_mx)]
                             
                             if len(v_plot) > 0:
@@ -812,10 +806,8 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                                 ax.set_facecolor('white')
                             else:
                                 ax.text(0.5, 0.5, "No Data", ha='center', fontsize=6)
-                                ax.set_xticks([])
-                                ax.set_yticks([])
+                                ax.set_xticks([]); ax.set_yticks([])
 
-                    # Add Colorbar only for Heatmap summary
                     if plot_type == "heatmap" and last_im:
                         cax = fig_sum.add_subplot(gs[:, -1])
                         fig_sum.colorbar(last_im, cax=cax, label="D (um^2/s)")
@@ -823,9 +815,8 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                     pdf.savefig(fig_sum)
                     plt.close(fig_sum)
 
-                # --- 1. Create Summary Pages based on Mode ---
+                # --- Generate Pages ---
                 mode = self.view_mode.get()
-                
                 if mode == "both":
                     create_summary_page("heatmap")
                     create_summary_page("hist")
@@ -834,37 +825,28 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                 elif mode == "hist":
                     create_summary_page("hist")
 
-                # --- 2. Create Individual Pages ---
+                # --- Individual Pages ---
                 for item in self.file_items:
                     fig = Figure(figsize=(w_in, h_in), dpi=100, facecolor='white')
-                    
                     data = item['data']
-                    mn = item['vars']['min'].get()
-                    mx = item['vars']['max'].get()
-                    bn = item['vars']['bins'].get()
-                    
+                    mn = item['vars']['min'].get(); mx = item['vars']['max'].get(); bn = item['vars']['bins'].get()
                     fname = os.path.basename(item['path'])
-                    if mode == "heatmap":
-                        param_str = f"Min:{mn:.1f}, Max:{mx:.1f}"
-                    else:
-                        param_str = f"Min:{mn:.1f}, Max:{mx:.1f}, Bins:{bn}"
+                    
+                    param_str = f"Min:{mn:.1f}, Max:{mx:.1f}"
+                    if mode != "heatmap": param_str += f", Bins:{bn}"
                     
                     fig.suptitle(f"{fname}\n{param_str}", fontsize=10, y=0.98)
-                    
                     ax_hm, ax_hist = None, None
                     
                     if mode == "both":
                         gs_ind = fig.add_gridspec(1, 2, width_ratios=[1, 1], wspace=0.2)
                         ax_hm = fig.add_subplot(gs_ind[0, 0])
                         ax_hist = fig.add_subplot(gs_ind[0, 1])
-                    elif mode == "heatmap":
-                        ax_hm = fig.add_subplot(111)
-                    elif mode == "hist":
-                        ax_hist = fig.add_subplot(111)
+                    elif mode == "heatmap": ax_hm = fig.add_subplot(111)
+                    elif mode == "hist": ax_hist = fig.add_subplot(111)
                     
                     fig.subplots_adjust(left=0.1, right=0.9, top=0.80, bottom=0.1)
 
-                    # Heatmap
                     if ax_hm:
                         masked = np.ma.masked_invalid(data)
                         im = ax_hm.imshow(masked, cmap='jet', vmin=mn, vmax=mx, aspect='auto', origin='upper')
@@ -875,16 +857,19 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                         if mask is not None:
                             ax_hm.contour(mask, colors='white', linewidths=1)
                             rt, rc = item.get('roi_type'), item.get('roi_coords')
-                            if rt == 'rect' and rc:
-                                ax_hm.add_patch(patches.Rectangle((rc[0], rc[1]), rc[2], rc[3], linewidth=1, edgecolor='white', facecolor='none'))
-                            elif rt == 'poly' and rc is not None:
-                                ax_hm.add_patch(patches.Polygon(rc, closed=True, linewidth=1, edgecolor='white', facecolor='none'))
+                            if rt == 'rect' and rc: ax_hm.add_patch(patches.Rectangle((rc[0], rc[1]), rc[2], rc[3], linewidth=1, edgecolor='white', facecolor='none'))
+                            elif rt == 'poly' and rc is not None: ax_hm.add_patch(patches.Polygon(rc, closed=True, linewidth=1, edgecolor='white', facecolor='none'))
                         
+                        # ★ Added: Ref Window Square
+                        if ref_w_px > 0:
+                            rect = patches.Rectangle((0, 0), ref_w_px, ref_w_px, linewidth=1, edgecolor='cyan', facecolor='none')
+                            ax_hm.add_patch(rect)
+
                         fig.colorbar(im, ax=ax_hm, fraction=0.046, pad=0.04)
 
-                    # Histogram
                     if ax_hist:
-                        valid_data = data[item['roi_mask']] if item['roi_mask'] is not None else data
+                        if item['roi_mask'] is not None: valid_data = data[item['roi_mask']]
+                        else: valid_data = data
                         valid_vals = valid_data[np.isfinite(valid_data)]
                         if len(valid_vals) > 0:
                             v_plot = valid_vals[(valid_vals >= mn) & (valid_vals <= mx)]
@@ -894,25 +879,14 @@ class MultiFileAnalysisWindow(tk.Toplevel):
                             mean_v = np.mean(valid_vals); std_v = np.std(valid_vals)
                             ax_hist.set_title(f"Hist (M:{mean_v:.1f}, S:{std_v:.1f})", fontsize=9)
                             ax_hist.tick_params(labelsize=8)
-                        else:
-                            ax_hist.text(0.5, 0.5, "No Data", ha='center')
+                        else: ax_hist.text(0.5, 0.5, "No Data", ha='center')
 
                     pdf.savefig(fig)
                     plt.close(fig)
             
             messagebox.showinfo("Success", f"Saved PDF to:\n{final_path}")
 
-        except Exception as e:
-            messagebox.showerror("Error", f"PDF Save failed: {e}")
-
-    def _get_unique_filepath(self, filepath):
-        if not os.path.exists(filepath): return filepath
-        base, ext = os.path.splitext(filepath)
-        counter = 1
-        while True:
-            new_path = f"{base}_{counter}{ext}"
-            if not os.path.exists(new_path): return new_path
-            counter += 1
+        except Exception as e: messagebox.showerror("Error", f"PDF Save failed: {e}")
 
     # --- Other Methods (Same as before) ---
     def _on_window_resize(self, event):
@@ -939,10 +913,10 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         p_min = tk.DoubleVar(value=self.g_min.get()); p_max = tk.DoubleVar(value=self.g_max.get()); p_bins = tk.IntVar(value=self.g_bins.get())
         card = ttk.Frame(self.scrollable_frame, relief="solid", borderwidth=1)
         head = ttk.Frame(card); head.pack(fill=tk.X, padx=2, pady=1)
-        fname = os.path.basename(filepath); disp_name = fname if len(fname)<25 else fname[:12]+"..."+fname[-8:]
+        fname = os.path.basename(filepath); disp_name = fname if len(fname) < 25 else fname[:12] + "..." + fname[-8:]
         ttk.Label(head, text=disp_name, font=("Arial", 9, "bold")).pack(side=tk.LEFT)
         content = ttk.Frame(card); content.pack(fill=tk.BOTH, expand=True)
-        fig = Figure(dpi=100, facecolor='white'); fig.patch.set_alpha(1.0)
+        fig = Figure(dpi=100, facecolor='white'); fig.patch.set_alpha(1.0); fig.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.1)
         canvas_widget = FigureCanvasTkAgg(fig, master=content)
         canvas_widget.get_tk_widget().configure(bg='white')
         canvas_widget.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -978,16 +952,18 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         if not self.file_items: return
         zoom = self.zoom_level.get(); target_w_px = 250 + (zoom - 1) * 120 
         canvas_w = self.canvas.winfo_width()
+        if canvas_w < 100: canvas_w = self.winfo_width()
         if canvas_w < 100: canvas_w = 1200
         cols = int(canvas_w / (target_w_px + 10)); cols = max(1, cols)
         available_w_px = (canvas_w / cols) - 15 
         if not self.unified_mode.get(): available_w_px -= 100 
-        fig_w_inch = max(2.0, available_w_px / 100.0)
+        dpi = 100
+        fig_w_inch = max(2.0, available_w_px / dpi)
         mode = self.view_mode.get()
         if mode == "both": fig_h_inch = fig_w_inch * 0.55 
         else: fig_h_inch = fig_w_inch * 0.95 
         if fig_h_inch < 2.0: fig_h_inch = 2.0
-        final_w_px = int(fig_w_inch * 100); final_h_px = int(fig_h_inch * 100)
+        final_w_px = int(fig_w_inch * dpi); final_h_px = int(fig_h_inch * dpi)
         for i, item in enumerate(self.file_items):
             card = item['widgets']['card']; card.grid_forget()
             r = i // cols; c = i % cols
@@ -1054,6 +1030,15 @@ class MultiFileAnalysisWindow(tk.Toplevel):
         for it in targets:
             if it['data'].shape == info['mask'].shape:
                 it['roi_mask'] = info['mask']; it['roi_type'] = info['type']; it['roi_coords'] = info['coords']; self.redraw_card(it)
+
+    def _get_unique_filepath(self, filepath):
+        if not os.path.exists(filepath): return filepath
+        base, ext = os.path.splitext(filepath)
+        counter = 1
+        while True:
+            new_path = f"{base}_{counter}{ext}"
+            if not os.path.exists(new_path): return new_path
+            counter += 1
 
     def load_roi_global(self):
         fpath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")]); 

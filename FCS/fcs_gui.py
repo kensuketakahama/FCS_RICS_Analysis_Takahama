@@ -36,6 +36,9 @@ class FCSApp:
         self.use_log_bin_var = tk.BooleanVar(value=False)
         self.n_segments_var = tk.IntVar(value=1)
 
+        self.trace_range_min = tk.DoubleVar(value=0.0)
+        self.trace_range_max = tk.DoubleVar(value=0.0)
+
         # --- Fitting Parameters ---
         # wz の代わりに S (Structure Factor = wz/w0) を導入
         # 初期値のSは configがあればそこから計算、なければ5.0とする
@@ -120,6 +123,15 @@ class FCSApp:
         d_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(d_frame, text="Bleach Correction (Detrend)", variable=self.use_detrend_var, 
                         command=self.update_analysis).pack(anchor="w")
+        
+        tr_frame = ttk.LabelFrame(panel, text="Trace Analysis Range (s)")
+        tr_frame.pack(fill=tk.X, pady=5)
+        f_tr = ttk.Frame(tr_frame); f_tr.pack(fill=tk.X, pady=2)
+        ttk.Label(f_tr, text="Start:").pack(side=tk.LEFT)
+        ttk.Entry(f_tr, textvariable=self.trace_range_min, width=6).pack(side=tk.LEFT, padx=5)
+        ttk.Label(f_tr, text="End:").pack(side=tk.LEFT)
+        ttk.Entry(f_tr, textvariable=self.trace_range_max, width=6).pack(side=tk.LEFT, padx=5)
+        ttk.Button(tr_frame, text="Update Range", command=self.update_analysis).pack(fill=tk.X, pady=2)
         
         # ACF Mode
         b_frame = ttk.LabelFrame(panel, text="ACF Mode")
@@ -217,6 +229,12 @@ class FCSApp:
             raw = prep.load_tiff(path)
             self.trace_raw = raw.flatten().astype(np.float64)
             self.trace_processed = self.trace_raw.copy()
+
+            pt_sec = self.pixel_time_var.get() * 1e-6
+            total_time = len(self.trace_raw) * pt_sec
+            self.trace_range_min.set(0.0)
+            self.trace_range_max.set(float(f"{total_time:.4g}"))
+
             self.update_analysis()
         except Exception as e: messagebox.showerror("Error", str(e))
 
@@ -234,10 +252,23 @@ class FCSApp:
             self.trace_processed = self.trace_raw.copy()
 
         self.time_axis = np.arange(n) * pt_sec
+
+        # 【修正・追加】指定範囲のデータを切り出してACF計算に使用
+        t_start = self.trace_range_min.get()
+        t_end = self.trace_range_max.get()
+        
+        # インデックスへ変換と範囲チェック
+        idx_start = int(t_start / pt_sec)
+        idx_end = int(t_end / pt_sec)
+        idx_start = max(0, min(idx_start, n-1))
+        idx_end = max(idx_start+10, min(idx_end, n)) # 最低限の点数を確保
+        
+        # 解析用データのスライス
+        trace_segment = self.trace_processed[idx_start:idx_end]
         
         # ACF
         n_seg = max(1, self.n_segments_var.get())
-        lags_raw, G_raw, sem_raw = calc.calculate_segmented_acf(self.trace_processed, n_segments=n_seg)
+        lags_raw, G_raw, sem_raw = calc.calculate_segmented_acf(trace_segment, n_segments=n_seg)
         time_lags = lags_raw * pt_sec
         
         if self.use_log_bin_var.get():
@@ -258,6 +289,16 @@ class FCSApp:
             self.ax_trace.plot(self.time_axis[::step], self.trace_processed[::step], 'g-', lw=0.5)
         else:
             self.ax_trace.plot(self.time_axis[::step], self.trace_raw[::step], 'g-', lw=0.5)
+
+        # 【追加】解析範囲の可視化 (開始線、終了線、除外領域のグレーアウト)
+        t_start = self.trace_range_min.get()
+        t_end = self.trace_range_max.get()
+        self.ax_trace.axvline(t_start, color='orange', ls='--', alpha=0.8)
+        self.ax_trace.axvline(t_end, color='orange', ls='--', alpha=0.8)
+
+        if len(self.time_axis) > 0:
+            self.ax_trace.axvspan(self.time_axis[0], t_start, color='gray', alpha=0.3)
+            self.ax_trace.axvspan(t_end, self.time_axis[-1], color='gray', alpha=0.3)
             
         self.ax_trace.set_title("Intensity Trace")
         self.ax_trace.set_xlabel("Time (s)")
