@@ -1096,12 +1096,72 @@ class ROIAnalysisWindow(tk.Toplevel):
         
         # Batch Save Settings
         self.save_mode = tk.StringVar(value="rename")
+
+        # --- 追加: 計測・ボックスツール用変数 ---
+        self.measure_active = False
+        self.box_active = False
+        self.meas_line = None
+        self.meas_text = None
+        self.ref_box = None
+        self.box_size_var = tk.IntVar(value=32)
+        self.drag_start = None
+
+        # ▼▼▼ 追加: スケールバー設定用変数 ▼▼▼
+        self.show_scalebar = tk.BooleanVar(value=True)
+        self.nm_per_px = tk.DoubleVar(value=50.0)    # 1pxあたりのnm
+        self.bar_len_um = tk.DoubleVar(value=1.0)    # 表示するバーの長さ(μm)
+
+        self.overlay_color = tk.StringVar(value="white") # 初期色
+        self.box_coords = None # ボックスの位置 (x, y, size) を記憶
         
         self.create_widgets()
 
     def create_widgets(self):
+        # --- 1. Scrollable Container Setup ---
+        # 全体を包むコンテナ
+        container = ttk.Frame(self)
+        container.pack(fill=tk.BOTH, expand=True)
+        
+        # スクロール用のCanvasとScrollbar
+        self.canvas_scroll = tk.Canvas(container)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas_scroll.yview)
+        
+        # 中身を入れるフレーム (ここにあらゆるウィジェットを配置する)
+        self.scroll_frame = ttk.Frame(self.canvas_scroll)
+        
+        # スクロール範囲の自動更新
+        self.scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas_scroll.configure(scrollregion=self.canvas_scroll.bbox("all"))
+        )
+        
+        # フレームをCanvasに配置
+        self.canvas_window = self.canvas_scroll.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        
+        self.canvas_scroll.configure(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 横幅をウィンドウサイズに合わせる
+        def _configure_canvas(event):
+            if event.width > 100:
+                self.canvas_scroll.itemconfig(self.canvas_window, width=event.width)
+        self.canvas_scroll.bind("<Configure>", _configure_canvas)
+
+        # マウスホイールでスクロール
+        def _on_mousewheel(event):
+            if platform.system() == "Darwin": delta = -1 * event.delta
+            else: delta = -1 * (event.delta / 120)
+            self.canvas_scroll.yview_scroll(int(delta), "units")
+        self.canvas_scroll.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # --- 2. Build UI inside self.scroll_frame ---
+        # すべてのウィジェットの親をこの 'parent' にします
+        parent = self.scroll_frame
+
         # 1. Top Controls
-        frame_top = ttk.Frame(self); frame_top.pack(fill=tk.X, padx=10, pady=5)
+        frame_top = ttk.Frame(parent); frame_top.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(frame_top, text="Load Reference Image", command=self.load_ref_image).pack(side=tk.LEFT, padx=5)
         ttk.Button(frame_top, text="Load Diffusion CSV", command=self.load_diff_data).pack(side=tk.LEFT, padx=5)
         ttk.Label(frame_top, text="View Mode:").pack(side=tk.LEFT, padx=10)
@@ -1110,7 +1170,7 @@ class ROIAnalysisWindow(tk.Toplevel):
         ttk.Radiobutton(frame_top, text="Both", variable=self.view_mode, value="both", command=self.refresh_plot).pack(side=tk.LEFT)
         
         # 2. Batch & Hist Frame
-        frame_batch = ttk.LabelFrame(self, text="Batch Analysis (Recursive)"); frame_batch.pack(fill=tk.X, padx=10, pady=5)
+        frame_batch = ttk.LabelFrame(parent, text="Batch Analysis (Recursive)"); frame_batch.pack(fill=tk.X, padx=10, pady=5)
         
         # Hist Config Row
         hb_row = ttk.Frame(frame_batch); hb_row.pack(fill=tk.X, padx=5, pady=2)
@@ -1135,28 +1195,62 @@ class ROIAnalysisWindow(tk.Toplevel):
         ttk.Button(act_row, text="Run Batch Heatmaps (CSV->PNG)", command=self.run_batch_heatmap_gen).pack(side=tk.LEFT, padx=5)
 
         # 3. Display Settings
-        frame_conf = ttk.LabelFrame(self, text="Display Settings"); frame_conf.pack(fill=tk.X, padx=10, pady=5)
+        frame_conf = ttk.LabelFrame(parent, text="Display Settings"); frame_conf.pack(fill=tk.X, padx=10, pady=5)
         ttk.Checkbutton(frame_conf, text="Auto Scale (%)", variable=self.disp_auto).pack(side=tk.LEFT, padx=5)
         ttk.Entry(frame_conf, textvariable=self.disp_perc, width=5).pack(side=tk.LEFT); ttk.Label(frame_conf, text="%").pack(side=tk.LEFT)
         ttk.Label(frame_conf, text=" | Max D:").pack(side=tk.LEFT, padx=10)
         ttk.Entry(frame_conf, textvariable=self.disp_max, width=5).pack(side=tk.LEFT)
         ttk.Button(frame_conf, text="Update View", command=self.refresh_plot).pack(side=tk.LEFT, padx=10)
+
+        ttk.Separator(frame_conf, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Checkbutton(frame_conf, text="ScaleBar", variable=self.show_scalebar, command=self.refresh_plot).pack(side=tk.LEFT)
+        
+        ttk.Label(frame_conf, text="nm/px:").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(frame_conf, textvariable=self.nm_per_px, width=5).pack(side=tk.LEFT)
+        
+        ttk.Label(frame_conf, text="Bar(um):").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(frame_conf, textvariable=self.bar_len_um, width=4).pack(side=tk.LEFT)
+
+        ttk.Label(frame_conf, text="Color:").pack(side=tk.LEFT, padx=5)
+        colors = ("white", "black", "cyan", "red", "yellow")
+        cb_col = ttk.Combobox(frame_conf, textvariable=self.overlay_color, values=colors, width=6, state="readonly")
+        cb_col.pack(side=tk.LEFT, padx=2)
+        cb_col.bind("<<ComboboxSelected>>", lambda e: self.refresh_plot()) 
+
+        # --- 追加: ツールバー (Measurement & Reference) ---
+        frame_tools = ttk.LabelFrame(parent, text="Tools")
+        frame_tools.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(frame_tools, text="Measure Length", command=self.enable_measure_mode).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(frame_tools, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        
+        ttk.Label(frame_tools, text="Ref Box Size:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(frame_tools, textvariable=self.box_size_var, width=5).pack(side=tk.LEFT)
+        ttk.Button(frame_tools, text="Place Box", command=self.enable_box_mode).pack(side=tk.LEFT, padx=5)
         
         # 4. Canvas
         self.fig = plt.Figure(figsize=(8, 6), dpi=100)
         self.ax = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent) # masterをparentに変更
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # 5. Bottom ROI Tools
-        frame_btm = ttk.Frame(self); frame_btm.pack(fill=tk.X, padx=10, pady=10)
+        frame_btm = ttk.Frame(parent); frame_btm.pack(fill=tk.X, padx=10, pady=10)
         self.btn_draw = ttk.Button(frame_btm, text="Start Drawing ROI", command=self.start_drawing, state="disabled")
         self.btn_draw.pack(side=tk.LEFT, padx=5)
+        ttk.Button(frame_btm, text="Load ROI", command=self.load_roi).pack(side=tk.LEFT, padx=5)
+        ttk.Button(frame_btm, text="Export ROI CSV", command=self.export_roi_csv).pack(side=tk.LEFT, padx=5)
         self.btn_calc = ttk.Button(frame_btm, text="Calculate Mean D", command=self.calculate_roi_stats, state="disabled")
         self.btn_calc.pack(side=tk.LEFT, padx=5)
         ttk.Button(frame_btm, text="Reset All", command=self.reset_all).pack(side=tk.RIGHT, padx=5)
         self.lbl_result = ttk.Label(frame_btm, text="Result: ---", font=("Arial", 12, "bold"), foreground="blue")
         self.lbl_result.pack(side=tk.LEFT, padx=20)
+
+         # イベントハンドラの登録 
+        self.canvas.mpl_connect('button_press_event', self.on_tool_press)
+        self.canvas.mpl_connect('motion_notify_event', self.on_tool_drag)
+        self.canvas.mpl_connect('button_release_event', self.on_tool_release)
 
     def _get_save_path(self, directory, filename):
         base, ext = os.path.splitext(filename)
@@ -1168,6 +1262,88 @@ class ROIAnalysisWindow(tk.Toplevel):
             full_path = os.path.join(directory, f"{base}_{counter}{ext}")
             counter += 1
         return full_path
+
+    # ▼▼▼ 追加: ROI読み込みメソッド ▼▼▼
+    def load_roi(self):
+        fpath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not fpath: return
+        try:
+            with open(fpath, 'r') as f: data = json.load(f)
+            rtype = data.get('type')
+            rdata = data.get('data')
+            
+            # 矩形(rect)で保存されたROIもポリゴンとして読み込む
+            if rtype == 'poly':
+                self.roi_verts = rdata
+            elif rtype == 'rect':
+                x, y, w, h = rdata
+                self.roi_verts = [[x, y], [x+w, y], [x+w, y+h], [x, y+h]]
+            
+            self.refresh_plot()
+            self.lbl_result.config(text="ROI Loaded from JSON.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load ROI: {e}")
+    # ▲▲▲ 追加終わり ▲▲▲
+
+    # --- 追加: ツール機能の実装 ---
+    def enable_measure_mode(self):
+        self.measure_active = True
+        self.box_active = False
+        if self.poly_selector: self.poly_selector.set_active(False)
+        self.lbl_result.config(text="Mode: Measure (Drag to measure)")
+
+    def enable_box_mode(self):
+        self.measure_active = False
+        self.box_active = True
+        if self.poly_selector: self.poly_selector.set_active(False)
+        self.lbl_result.config(text="Mode: Place Box (Click to place)")
+
+    def on_tool_press(self, event):
+        if event.inaxes != self.ax: return
+        
+        if self.measure_active:
+            self.drag_start = (event.xdata, event.ydata)
+            # 古い描画を削除
+            if self.meas_line: 
+                try: self.meas_line.remove()
+                except: pass
+            if self.meas_text:
+                try: self.meas_text.remove()
+                except: pass
+            
+            # 新しい線とテキストを描画
+            self.meas_line, = self.ax.plot([event.xdata, event.xdata], [event.ydata, event.ydata], color='yellow', linewidth=2)
+            self.meas_text = self.ax.text(event.xdata, event.ydata, "0.0 px", color='yellow', fontweight='bold', ha='left', va='bottom')
+            self.canvas.draw()
+            
+        elif self.box_active:
+            sz = self.box_size_var.get()
+            self.box_coords = (event.xdata - sz/2, event.ydata - sz/2, sz)
+            self.refresh_plot()
+            if self.ref_box:
+                try: self.ref_box.remove()
+                except: pass
+            
+            # クリック位置を中心にボックスを描画
+            self.ref_box = patches.Rectangle((event.xdata - sz/2, event.ydata - sz/2), sz, sz, 
+                                             linewidth=2, edgecolor='cyan', facecolor='none')
+            self.ax.add_patch(self.ref_box)
+            self.canvas.draw()
+
+    def on_tool_drag(self, event):
+        if event.inaxes != self.ax or not self.drag_start: return
+        
+        if self.measure_active and self.meas_line:
+            x0, y0 = self.drag_start
+            x1, y1 = event.xdata, event.ydata
+            self.meas_line.set_data([x0, x1], [y0, y1])
+            dist = np.sqrt((x1-x0)**2 + (y1-y0)**2)
+            self.meas_text.set_position((x1, y1))
+            self.meas_text.set_text(f"{dist:.1f} px")
+            self.canvas.draw()
+
+    def on_tool_release(self, event):
+        self.drag_start = None
 
     def reset_all(self):
         self.ref_image = None; self.diff_map = None; self.roi_verts = None
@@ -1207,6 +1383,41 @@ class ROIAnalysisWindow(tk.Toplevel):
     def refresh_plot(self):
         self.fig.clf()
         mode = self.view_mode.get()
+        # ★追加: 選択されている色を取得
+        ov_color = self.overlay_color.get()
+
+        # --- 内部関数: スケールバー描画 ---
+        def add_scale_bar(ax, img_shape):
+            if not self.show_scalebar.get(): return
+            try:
+                nm_px = self.nm_per_px.get()
+                tgt_um = self.bar_len_um.get()
+                if nm_px <= 0 or tgt_um <= 0: return
+                
+                # ピクセル数を計算: (um * 1000) / (nm/px)
+                bar_w_px = (tgt_um * 1000) / nm_px
+                
+                H, W = img_shape
+                # 右下に配置 (右端から5%, 下端から5%の位置)
+                pad_x = W * 0.05
+                pad_y = H * 0.05
+                x0 = W - bar_w_px - pad_x
+                y0 = H - pad_y # origin='upper'なので下の方が座標が大きい
+                
+                # バーの太さ
+                bar_h = max(2, H * 0.015)
+                
+                # ★修正: 色を適用 (facecolorに選択色を使用)
+                rect = patches.Rectangle((x0, y0 - bar_h), bar_w_px, bar_h, 
+                                       linewidth=0, facecolor=ov_color, edgecolor='none')
+                ax.add_patch(rect)
+                
+                # ★修正: テキスト色にも選択色を適用
+                ax.text(x0 + bar_w_px/2, y0 - bar_h - (H*0.02), f"{tgt_um} µm", 
+                        color=ov_color, ha='center', va='bottom', fontsize=9, fontweight='bold')
+            except: pass
+
+        # --- 内部関数: マップ描画 ---
         def plot_map(ax, data, title, is_heatmap=False):
             if is_heatmap:
                 masked_map = np.ma.masked_invalid(data)
@@ -1216,27 +1427,64 @@ class ROIAnalysisWindow(tk.Toplevel):
                     vmin = np.min(valid)
                     if self.disp_auto.get(): vmax = np.percentile(valid, self.disp_perc.get())
                     else: vmax = self.disp_max.get()
-                im = ax.imshow(masked_map, cmap='jet', vmin=vmin, vmax=vmax)
-                self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                
+                # カラーバーに単位を追加
+                im = ax.imshow(masked_map, cmap='jet', vmin=vmin, vmax=vmax, aspect='equal')
+                self.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"D ($\mu m^2/s$)")
             else:
-                ax.imshow(data, cmap='gray')
+                ax.imshow(data, cmap='gray', aspect='equal')
+            
             ax.set_title(title)
+            ax.axis('off') # 画像なので軸メモリは消すのが一般的
+            
             if self.roi_verts is not None:
                 poly = patches.Polygon(self.roi_verts, closed=True, linewidth=2, edgecolor='red', facecolor='none')
                 ax.add_patch(poly)
+            
+            # スケールバーを描画
+            add_scale_bar(ax, data.shape)
+
+        # --- 表示モード分岐 ---
         if mode == "both":
-            ax1 = self.fig.add_subplot(121); ax2 = self.fig.add_subplot(122)
-            if self.ref_image is not None: plot_map(ax1, self.ref_image, "Reference")
-            else: ax1.text(0.5, 0.5, "No Ref Image", ha='center')
-            if self.diff_map is not None: plot_map(ax2, self.diff_map, "Heatmap", True)
-            else: ax2.text(0.5, 0.5, "No Diff Data", ha='center')
+            ax1 = self.fig.add_subplot(121)
+            ax2 = self.fig.add_subplot(122)
+            
+            if self.ref_image is not None: 
+                plot_map(ax1, self.ref_image, "Reference")
+            else: 
+                ax1.text(0.5, 0.5, "No Ref Image", ha='center'); ax1.axis('off')
+            
+            if self.diff_map is not None: 
+                plot_map(ax2, self.diff_map, "Heatmap", True)
+            else: 
+                ax2.text(0.5, 0.5, "No Diff Data", ha='center'); ax2.axis('off')
+            
             self.ax = ax2 
         else:
             self.ax = self.fig.add_subplot(111)
-            if mode == "heatmap" and self.diff_map is not None: plot_map(self.ax, self.diff_map, "Heatmap", True)
-            elif mode == "reference" and self.ref_image is not None: plot_map(self.ax, self.ref_image, "Reference")
-            elif self.diff_map is not None: plot_map(self.ax, self.diff_map, "Heatmap", True)
-            elif self.ref_image is not None: plot_map(self.ax, self.ref_image, "Reference")
+            # 各条件でプロット
+            if mode == "heatmap":
+                if self.diff_map is not None: plot_map(self.ax, self.diff_map, "Heatmap", True)
+                else: self.ax.text(0.5, 0.5, "No Diff Data", ha='center'); self.ax.axis('off')
+            
+            elif mode == "reference":
+                if self.ref_image is not None: plot_map(self.ax, self.ref_image, "Reference")
+                else: self.ax.text(0.5, 0.5, "No Ref Image", ha='center'); self.ax.axis('off')
+            
+            # 該当なしの場合はデータがある方を優先表示
+            elif self.diff_map is not None: 
+                plot_map(self.ax, self.diff_map, "Heatmap", True)
+            elif self.ref_image is not None: 
+                plot_map(self.ax, self.ref_image, "Reference")
+            else:
+                self.ax.text(0.5, 0.5, "No Data", ha='center'); self.ax.axis('off')
+
+        # ★追加: 保存されたボックスがあれば描画 (指定色で)
+        if self.box_coords is not None:
+            x, y, s = self.box_coords
+            rect = patches.Rectangle((x, y), s, s, linewidth=2, edgecolor=ov_color, facecolor='none')
+            self.ax.add_patch(rect)
+
         self.canvas.draw()
 
     def start_drawing(self):
@@ -1255,17 +1503,93 @@ class ROIAnalysisWindow(tk.Toplevel):
             points = np.vstack((x.ravel(), y.ravel())).T
             path = Path(self.roi_verts)
             mask = path.contains_points(points).reshape(H, W)
-            vals = self.diff_map[mask]
-            valid = vals[np.isfinite(vals)]
-            if len(valid) == 0: res = "No valid data."
+            
+            # ★ 追加: 閾値設定 (Display Settingsの入力値を使用)
+            filt_max = self.disp_max.get()
+            
+            # --- ROI内部の計算 ---
+            vals_in = self.diff_map[mask]
+            # 有限値 かつ 0以上 かつ 閾値(Max D)以下 のデータのみ抽出
+            valid_in = vals_in[np.isfinite(vals_in) & (vals_in >= 0) & (vals_in <= filt_max)]
+            
+            # --- ROI外部の計算 (マスク反転) ---
+            vals_out = self.diff_map[~mask]
+            # 同様にフィルタリング
+            valid_out = vals_out[np.isfinite(vals_out) & (vals_out >= 0) & (vals_out <= filt_max)]
+            
+            res_str = ""
+            plot_text_lines = []
+
+            # 内部の結果
+            if len(valid_in) > 0:
+                mean_in = np.mean(valid_in)
+                std_in = np.std(valid_in)
+                res_str += f"In: {mean_in:.3f}±{std_in:.3f}"
+                plot_text_lines.append(f"In: {mean_in:.2f}")
             else:
-                res = f"Mean: {np.mean(valid):.3f} ± {np.std(valid):.3f} (n={len(valid)})"
-                self.refresh_plot()
-                cx = np.mean([v[0] for v in self.roi_verts]); cy = np.mean([v[1] for v in self.roi_verts])
-                self.ax.text(cx, cy, f"{np.mean(valid):.2f}", color='white', fontweight='bold', ha='center')
-                self.canvas.draw()
-            self.lbl_result.config(text=res)
+                res_str += "In: No Data"
+
+            res_str += " | "
+
+            # 外部の結果
+            if len(valid_out) > 0:
+                mean_out = np.mean(valid_out)
+                std_out = np.std(valid_out)
+                res_str += f"Out: {mean_out:.3f}±{std_out:.3f}"
+                plot_text_lines.append(f"Out: {mean_out:.2f}")
+            else:
+                res_str += "Out: No Data"
+
+            # 結果ラベルの更新
+            self.lbl_result.config(text=res_str)
+            
+            # プロット上の表示更新
+            self.refresh_plot()
+            cx = np.mean([v[0] for v in self.roi_verts])
+            cy = np.mean([v[1] for v in self.roi_verts])
+            
+            # グラフ上に数値を表示
+            self.ax.text(cx, cy, "\n".join(plot_text_lines), color='white', fontweight='bold', 
+                         ha='center', va='center', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+            self.canvas.draw()
+            
         except Exception: pass
+
+    def export_roi_csv(self):
+        if self.diff_map is None:
+            messagebox.showinfo("Info", "No diffusion data loaded.")
+            return
+        if self.roi_verts is None:
+            messagebox.showinfo("Info", "No ROI defined.")
+            return
+
+        # 保存先選択
+        fpath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export ROI Data (Outside=NaN)"
+        )
+        if not fpath: return
+
+        try:
+            # ROIマスクの作成
+            H, W = self.diff_map.shape
+            y, x = np.mgrid[:H, :W]
+            points = np.vstack((x.ravel(), y.ravel())).T
+            path = Path(self.roi_verts)
+            mask = path.contains_points(points).reshape(H, W)
+
+            # データコピーしてROI外をNaNにする
+            out_data = self.diff_map.copy()
+            out_data[~mask] = np.nan
+
+            # CSV保存 (欠損値NaNはそのままで保存されるか、必要ならnan_repで指定可能)
+            np.savetxt(fpath, out_data, delimiter=",", fmt="%.6f")
+            
+            messagebox.showinfo("Success", f"Saved ROI CSV to:\n{os.path.basename(fpath)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export CSV: {e}")
 
     def show_current_histogram(self):
         if self.diff_map is None: return
