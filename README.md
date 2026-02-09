@@ -54,12 +54,12 @@
 
 2.  **リポジトリのクローン（またはダウンロード）**
     ```bash
-    git clone [https://github.com/kensuketakahama/FCS_RICS_Analysis_Takahama.git](https://github.com/kensuketakahama/FCS_RICS_Analysis_Takahama.git)
+    git clone https://github.com/kensuketakahama/FCS_RICS_Analysis_Takahama.git
     cd FCS_RICS_Analysis_Takahama
     ```
 
 3.  **仮想環境 (venv) の作成**
-    プロジェクト専用のPython環境を作成します。
+    プロジェクト専用のPython環境を作成します。これはどのディレクトリでも構いませんが、アプリケーションを動かす際に、仮想環境に入っておくことが必要です。
     ```bash
     python3 -m venv venv
     ```
@@ -71,7 +71,7 @@
     ※ ターミナルの先頭に `(venv)` と表示されればOKです。
 
 5.  **依存ライブラリのインストール**  
-    各ディレクトリ内で以下のコマンドを実行してください。
+    RICS, FCSのそれぞれのディレクトリ内で以下のコマンドを実行してください。また、これを実行する前に仮想環境に入っておくことが必要です。
     ```bash
     pip install -r requirements.txt
     ```
