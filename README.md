@@ -5,6 +5,12 @@
 └── FCS
 │   ├── Data
 │   ├── src
+│   │   ├── __init__.py
+│   │   ├── calculation.py
+│   │   ├── model.py
+│   │   ├── correlation.py
+│   │   ├── loader.py
+│   │   └── preprocessing.py
 │   ├── requirements.txt
 │   ├── check_raw_data.py
 │   ├── test.py
@@ -12,9 +18,14 @@
 ├── RICS
 │   ├── Data
 │   ├── src
+│   │   ├── __init__.py
+│   │   ├── calculation.py
+│   │   ├── model.py
+│   │   └── preprocessing.py
 │   ├── requirements.txt
 │   ├── config.py
 │   ├── gui_app.py
+│   ├── README.md
 │   └── main.py
 ├── .gitignore
 └── RWADME.md
